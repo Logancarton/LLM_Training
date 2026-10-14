@@ -30,6 +30,18 @@ STATE = re.compile(
     rf"(?:in|at|on|inside)\s+(?:the\s+|a\s+)?(?P<place>{ENTITY})\b", re.I)
 WHERE = re.compile(r"\bwhere\s+(?:is|was|did)\s+(?:the\s+|a\s+)?(?P<entity>[a-z][a-z0-9_-]*)", re.I)
 WHERE_GO = re.compile(r"\bwhere\s+did\s+(?:the\s+|a\s+)?(?P<entity>[a-z][a-z0-9_-]*)\s+go\b", re.I)
+BEFORE_LOCATION = re.compile(
+    rf"\bbefore\s+(?:(?P<pronoun>it|he|she|they)\b|(?:(?:the|a)\s+)?(?P<subject>{ENTITY}))\s+"
+    rf"(?:was|is|moved|went|got|arrived)\s+"
+    rf"(?:at|in|into|inside|on|to)\s+(?:(?:the|a)\s+)?(?P<anchor>{ENTITY})\b",
+    re.I,
+)
+# Unknown temporal relationships must never fall back to the most recent location.
+UNSUPPORTED_TEMPORAL = re.compile(
+    r"\b(?:after|since|until|between|when|initially|first|yesterday|tomorrow|ago|from)\b"
+    r"|\b(?:last|next)\s+(?:week|month|year|night)\b",
+    re.I,
+)
 TIME = re.compile(r"\b(\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d))\b")
 STOP = {"a", "the", "to", "at", "is", "was", "did", "go", "where"}
 
@@ -96,12 +108,32 @@ class WorldCognition:
             return float(F.softmax(self.net(token_ids(text)), dim=-1)[0, 1])
 
     def answer_where(self, question: str) -> str | None:
+        """Answer only evidence-supported location queries using event-time order.
+
+        The language classifier here is intentionally conservative; it proves
+        temporal *selection*, not learned natural-language understanding.
+        """
         match = WHERE_GO.search(question) or WHERE.search(question)
         if not match:
             return None
         entity = match["entity"].lower()
-        if re.search(r"\b(?:at|on)\s+\d", question, re.I):
-            return "Unknown: time-qualified world queries need an explicit event-time reasoning test."
+        anchored_before = BEFORE_LOCATION.search(question)
+        temporal_before = bool(re.search(r"\bbefore\b", question, re.I))
+        temporal_previous = bool(re.search(r"\b(?:previously|earlier)\b", question, re.I))
+        if (re.search(r"\b(?:at|on)\s+\d", question, re.I)
+                or UNSUPPORTED_TEMPORAL.search(question)):
+            return f"Unknown: unsupported historical time condition for {entity}."
+        if anchored_before and anchored_before.group("subject"):
+            if anchored_before.group("subject").lower() != entity:
+                return f"Unknown: temporal reference does not match {entity}."
+        if temporal_before and not anchored_before:
+            # A bare "before?" can refer to the prior recorded *different*
+            # location. Unrecognized clauses must not silently mean "latest".
+            if not re.search(r"\bbefore\s*\??\s*$", question, re.I):
+                return f"Unknown: unsupported before-condition for {entity}."
+        if temporal_previous and re.search(r"\b(?:today|this|that|then)\b", question, re.I):
+            return f"Unknown: ambiguous temporal reference for {entity}."
+
         observations = []
         for memory_id in self.memories.entity_index.get(entity, ()):
             memory = self.memories.memories[memory_id]
@@ -112,14 +144,54 @@ class WorldCognition:
                 observations.append((state.get("observed_at", memory.timestamp_iso), memory, state))
         if not observations:
             return f"Unknown: no explicit location observation for {entity}."
-        # Compare instants, not ISO strings with different timezone offsets.
+        # Always order by event time, then the exact ingestion instant for ties.
         observations.sort(key=lambda row: (datetime.fromisoformat(row[0]),
                                            row[1].timestamp_epoch,
                                            row[1].id))
+
+        def previous_different(index):
+            current_location = observations[index][2]["location"]
+            for earlier in reversed(observations[:index]):
+                if earlier[2]["location"] != current_location:
+                    return earlier
+            return None
+
+        if anchored_before:
+            destination = anchored_before.group("anchor").lower()
+            anchors = [i for i, item in enumerate(observations)
+                       if item[2]["location"] == destination]
+            if not anchors:
+                return (f"Unknown: no recorded observation of {entity} at "
+                        f"{destination} to anchor a before-query.")
+            if len(anchors) > 1:
+                return (f"Unknown: multiple recorded arrivals or observations of {entity} "
+                        f"at {destination}; clarify which occurrence.")
+            anchor = observations[anchors[0]]
+            earlier = previous_different(anchors[0])
+            if earlier is None:
+                return (f"Unknown: no earlier, different recorded location for {entity} "
+                        f"before {destination}.")
+            _, memory, frame = earlier
+            return (f"Previously reported location: {entity} was at {frame['location']} "
+                    f"(event time {frame['observed_at']}; memory {memory.id}), "
+                    f"before the recorded {destination} observation "
+                    f"(memory {anchor[1].id}). "
+                    "This is ordered reported evidence, not a verified continuous trajectory.")
+
+        if temporal_before or temporal_previous:
+            earlier = previous_different(len(observations) - 1)
+            if earlier is None:
+                return f"Unknown: no earlier, different recorded location for {entity}."
+            _, memory, frame = earlier
+            return (f"Previously reported location: {entity} was at {frame['location']} "
+                    f"(event time {frame['observed_at']}; memory {memory.id}). "
+                    "This is ordered reported evidence, not a verified continuous trajectory.")
+
+        # No temporal qualifier: answer the last reported location.
         _, evidence, state = observations[-1]
         probability = self.change_probability(evidence.content)
-        suffix = (f" World-model state-change estimate: {probability:.2f} (experimental, not verification)."
-                  if probability is not None else "")
+        suffix = (f" World-model state-change estimate: {probability:.2f} "
+                  "(experimental, not verification)." if probability is not None else "")
         return (f"Observed report: {entity} was at {state['location']} "
                 f"(event time {state.get('observed_at', 'unknown')}; memory {evidence.id})."
                 f" This is attributed evidence, not independently verified truth.{suffix}")
