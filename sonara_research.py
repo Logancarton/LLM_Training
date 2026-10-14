@@ -1,13 +1,14 @@
-"""Opt-in research model: learns which external AI source is useful, never owns world truth.
+"""Local research assistant for Sonara, separate from her world model.
 
-No API keys or external answers enter checkpoints. Only explicit research prompts leave
-the local machine; replies are candidate evidence and require independent verification.
+A compact Ollama-served LLM supplies tentative explanations on explicit request.
+A tiny independently trainable head learns *predicted research usefulness* from
+feedback; it does not retrain the LLM or authorize updates to world knowledge.
+No API keys, paid services, cloud endpoints, or automatic web requests.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import urllib.error
 import urllib.request
@@ -17,13 +18,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-PROVIDERS = ("openai", "anthropic", "gemini")
-KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
-        "gemini": "GEMINI_API_KEY"}
+DEFAULT_LOCAL_MODEL = "qwen2.5:1.5b-instruct"
+LOCAL_ENDPOINT = "http://127.0.0.1:11434/api/generate"
 
 
 def query_features(question: str) -> torch.Tensor:
-    """Stable hashed question features; no vocabulary expansion or stored secrets."""
     features = torch.zeros(1, 256)
     words = re.findall(r"[a-z0-9_-]+", question.lower())[:128]
     for word in words:
@@ -33,116 +32,110 @@ def query_features(question: str) -> torch.Tensor:
 
 
 class ResearchModel(nn.Module):
-    """Small trainable provider-utility estimator, not a second truth authority."""
+    """Predict whether local research is useful, not whether its answer is true."""
     def __init__(self):
         super().__init__()
-        self.router = nn.Sequential(nn.Linear(256, 24), nn.Tanh(), nn.Linear(24, len(PROVIDERS)))
+        self.utility_head = nn.Sequential(nn.Linear(256, 24), nn.Tanh(), nn.Linear(24, 1))
 
-    def forward(self, features):
-        return torch.sigmoid(self.router(features))
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.utility_head(features))
 
 
-def _json_post(url: str, headers: dict, payload: dict) -> dict:
+def ollama_local_generate(question: str, model: str) -> str:
+    """Send only to the fixed local-loopback Ollama endpoint, with no proxy."""
+    if not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,100}", model):
+        raise ValueError("Invalid local Ollama model name")
+    payload = {
+        "model": model,
+        "system": ("You are Sonara's LOCAL research assistant, not her world model. "
+                   "Offer concise hypotheses and explanations, distinguish observed "
+                   "evidence from speculation, and say when you do not know. "
+                   "You have no live internet or guaranteed source verification."),
+        "prompt": question,
+        "stream": False,
+        "keep_alive": "3m",
+        "options": {"temperature": 0.2, "num_predict": 256, "num_ctx": 2048},
+    }
     request = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers}, method="POST")
-    with urllib.request.urlopen(request, timeout=35) as response:
-        return json.loads(response.read(800_000).decode("utf-8"))
-
-
-def ask_provider(provider: str, question: str) -> str:
-    """One explicit outbound request. Provider output is always untrusted evidence."""
-    if provider not in PROVIDERS:
-        raise ValueError(f"Unsupported provider: {provider}")
-    key = os.environ.get(KEYS[provider], "")
-    if not key:
-        raise ValueError(f"Set {KEYS[provider]} to enable this provider")
-    system = ("Respond with verifiable, concise factual analysis, label uncertainty, "
-              "and provide original references when available. Do not claim verification.")
-    if provider == "openai":
-        result = _json_post("https://api.openai.com/v1/chat/completions",
-            {"Authorization": f"Bearer {key}"},
-            {"model": os.environ.get("SONARA_OPENAI_MODEL", "gpt-4.1-mini"),
-             "messages": [{"role": "system", "content": system},
-                          {"role": "user", "content": question}], "max_completion_tokens": 450})
-        answer = result["choices"][0]["message"]["content"]
-    elif provider == "anthropic":
-        result = _json_post("https://api.anthropic.com/v1/messages",
-            {"x-api-key": key, "anthropic-version": "2023-06-01"},
-            {"model": os.environ.get("SONARA_ANTHROPIC_MODEL", "claude-sonnet-4-5"),
-             "max_tokens": 450, "system": system,
-             "messages": [{"role": "user", "content": question}]})
-        answer = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
-    else:
-        import urllib.parse
-        model = os.environ.get("SONARA_GEMINI_MODEL", "gemini-2.5-flash")
-        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", model):
-            raise ValueError("Invalid Gemini model name")
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?"
-               + urllib.parse.urlencode({"key": key}))
-        result = _json_post(url, {},
-            {"systemInstruction": {"parts": [{"text": system}]},
-             "contents": [{"parts": [{"text": question}]}],
-             "generationConfig": {"maxOutputTokens": 450}})
-        answer = "\n".join(part.get("text", "") for part in
-                result["candidates"][0]["content"]["parts"])
-    return str(answer or "").strip()[:6000]
+        LOCAL_ENDPOINT,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    # Never inherit HTTP_PROXY/HTTPS_PROXY: the request must remain local.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=90) as response:
+            raw = response.read(100_000)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            raise ValueError(f"Local model is missing. Run: ollama pull {model}") from error
+        raise ValueError(f"Ollama returned HTTP {error.code}") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise ValueError("Cannot reach local Ollama. Start Ollama or run: ollama serve") from error
+    try:
+        answer = json.loads(raw.decode("utf-8"))["response"]
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError) as error:
+        raise ValueError("Unexpected response from local Ollama") from error
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Local Ollama produced an empty response")
+    return answer.strip()[:6000]
 
 
 class ResearchCognition:
-    def __init__(self, data_dir: str | Path, transport=ask_provider):
-        self.checkpoint = Path(data_dir) / "research_model.pt"
+    def __init__(self, data_dir: str | Path, local_model: str = DEFAULT_LOCAL_MODEL,
+                 transport=None):
+        # Separate from the former cloud-provider routing checkpoint, which had
+        # incompatible output dimensions and must never silently load or overwrite.
+        self.checkpoint = Path(data_dir) / "research_utility_model.pt"
         self.model = ResearchModel()
-        self.transport = transport
+        self.local_model = local_model
+        self.transport = transport or ollama_local_generate
         if self.checkpoint.exists():
             state = torch.load(self.checkpoint, map_location="cpu", weights_only=True)
             self.model.load_state_dict(state["weights"])
         self.model.eval()
 
-    def available(self):
-        return tuple(p for p in PROVIDERS if os.environ.get(KEYS[p]))
-
-    def select(self, question: str, allowed: tuple[str, ...]) -> str:
-        if not allowed or any(p not in PROVIDERS for p in allowed):
-            raise ValueError("No configured permitted AI providers")
+    def expected_utility(self, question: str) -> float:
         self.model.eval()
         with torch.no_grad():
-            scores = self.model(query_features(question))[0]
-        return max(allowed, key=lambda provider: float(scores[PROVIDERS.index(provider)]))
+            return float(self.model(query_features(question))[0, 0])
 
-    def research(self, question: str, provider: str | None = None) -> dict:
+    def research(self, question: str) -> dict:
         if not question.strip() or len(question) > 4000:
             raise ValueError("Research question must contain 1-4000 characters")
-        permitted = self.available()
-        if not permitted:
-            raise ValueError("No AI provider configured. Set an API key environment variable.")
-        selected = provider or self.select(question, permitted)
-        if selected not in permitted:
-            raise ValueError("Provider was not enabled with an API key")
-        answer = self.transport(selected, question)
-        return {"provider": selected, "question": question, "answer": answer,
-                "status": "unverified_external_evidence"}
+        answer = self.transport(question, self.local_model)
+        return {
+            "model": self.local_model,
+            "question": question,
+            "answer": answer,
+            "status": "unverified_local_model_output",
+            "estimated_utility": round(self.expected_utility(question), 3),
+        }
 
-    def feedback(self, question: str, provider: str, utility: float, steps: int = 8) -> dict:
-        """Train routing only from explicitly graded usefulness, never from answer content."""
-        if provider not in PROVIDERS or not 0.0 <= utility <= 1.0:
-            raise ValueError("Provider invalid or score outside [0,1]")
+    def feedback(self, question: str, utility: float, steps: int = 8) -> dict:
+        """Fit usefulness estimates only when rated; never ingest the LLM answer."""
+        if not question.strip() or not 0.0 <= utility <= 1.0 or not 1 <= steps <= 32:
+            raise ValueError("Usefulness score must be 0..1 and training steps 1..32")
         features = query_features(question)
-        target = torch.tensor([utility])
-        index = PROVIDERS.index(provider)
-        self.model.train()
+        target = torch.tensor([[utility]])
+        self.model.eval()
+        before = float((self.model(features) - target).abs().item())
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=0.004)
-        before = float((self.model(features)[0, index] - target[0]).abs().detach())
+        self.model.train()
         for _ in range(steps):
-            predicted = self.model(features)[0, index:index+1]
+            predicted = self.model(features)
             loss = F.mse_loss(predicted, target)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
         self.model.eval()
-        after = float((self.model(features)[0, index] - target[0]).abs().detach())
+        after = float((self.model(features) - target).abs().item())
         self.checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"weights": self.model.state_dict()}, self.checkpoint)
-        return {"trained": after < before, "utility_error_before": round(before, 4),
-                "utility_error_after": round(after, 4),
-                "note": "Local feedback fit, not proven cross-question provider routing"}
+        torch.save({"weights": self.model.state_dict(), "version": 1}, self.checkpoint)
+        return {
+            "trained": after < before,
+            "utility_error_before": round(before, 4),
+            "utility_error_after": round(after, 4),
+            "note": "Local feedback fit only; not evidence of general research skill.",
+        }
