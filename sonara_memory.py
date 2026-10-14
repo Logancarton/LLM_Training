@@ -234,7 +234,8 @@ class SonaraMemorySystem:
         with self.memories_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(mem.to_dict(), ensure_ascii=False) + "\n")
         self._index_memory(mem)
-        self.export_journal()
+        # Journal is an on-demand human-readable export. Rebuilding it after
+        # every observation made ingestion O(N^2) as memory grows.
 
     # -----------------------------------------------------------------
     # CORE API: REMEMBER / SAVE
