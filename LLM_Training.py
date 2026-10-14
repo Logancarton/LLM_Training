@@ -1390,17 +1390,17 @@ def learn_approved(data_dir, args, data, word_model, reader, writer, device):
 # =====================================================================
 
 
-def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_research=False, research_provider=None):
+def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_research=False, research_model="qwen2.5:1.5b-instruct"):
     session_id = uuid.uuid4().hex[:12]
     from sonara_memory import SonaraMemorySystem
     from sonara_world import WorldCognition
     from sonara_research import ResearchCognition
     mem_sys = SonaraMemorySystem(Path(data_dir) / "sonara_memories")
     world = WorldCognition(mem_sys, data_dir)
-    research = ResearchCognition(data_dir) if enable_research else None
+    research = ResearchCognition(data_dir, local_model=research_model) if enable_research else None
     last_research = None
     print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline | /reflect | /feedback")
-    print("World: /train-world (bounded weak-supervision experiment). Research: /research <question> and /rate-research <0..1> (requires --enable-research).")
+    print("World: /train-world (bounded experiment). Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "start", "timestamp": now_iso(), "local_user": "owner"})
     event_index = 0
     last_prediction = None
@@ -1419,19 +1419,19 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_r
             continue
         if line.startswith("/research "):
             if research is None:
-                print("Sonara> External research is disabled. Restart with --enable-research to opt in.")
+                print("Sonara> Local research is disabled. Restart with --enable-research to opt in.")
                 continue
             question = line[len("/research "):].strip()
             try:
-                result = research.research(question, research_provider)
+                result = research.research(question)
             except (ValueError, OSError, KeyError, IndexError) as error:
                 print("Sonara> Research unavailable:", type(error).__name__, str(error)[:200])
                 continue
             last_research = result
             append_record(Path(data_dir) / "research_events.jsonl",
                           {"timestamp": now_iso(), "session_id": session_id,
-                           "source": "external_ai", **result})
-            print(f"Sonara> UNVERIFIED EXTERNAL AI ({result['provider']}): {result['answer']}")
+                           "source": "local_model", **result})
+            print(f"Sonara> UNVERIFIED LOCAL MODEL ({result['model']}): {result['answer']}")
             continue
         if line.startswith("/rate-research "):
             if research is None or last_research is None:
@@ -1439,16 +1439,16 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_r
                 continue
             try:
                 utility = float(line[len("/rate-research "):].strip())
-                metrics = research.feedback(last_research["question"], last_research["provider"], utility)
+                metrics = research.feedback(last_research["question"], utility)
             except ValueError as error:
                 print("Sonara> Invalid usefulness score:", error)
                 continue
             append_record(Path(data_dir) / "research_feedback.jsonl",
                           {"timestamp": now_iso(), "session_id": session_id,
-                           "provider": last_research["provider"], "question": last_research["question"],
+                           "model": last_research["model"], "question": last_research["question"],
                            "utility": utility, "training": metrics})
             last_research = None
-            print("Sonara> Research routing feedback:", json.dumps(metrics, sort_keys=True))
+            print("Sonara> Local research utility feedback:", json.dumps(metrics, sort_keys=True))
             continue
         if line.startswith("/feedback "):
             correction = line[len("/feedback "):].strip()
@@ -1710,9 +1710,10 @@ def main():
     parser.add_argument("--novel-detail", default="the dog walks slowly behind the ball .")
     parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "thoughts", "self-test", "memories"), default="train")
     parser.add_argument("--data-dir", default="learning_data", help="Local private session and approval files")
-    parser.add_argument("--enable-research", action="store_true", help="Explicitly permit /research to send questions to configured external AI APIs")
-    parser.add_argument("--research-provider", choices=("openai", "anthropic", "gemini"), default=None,
-                        help="Optionally pin one configured research provider rather than learned routing")
+    parser.add_argument("--enable-research", action="store_true",
+                        help="Enable explicit /research requests to a laptop-local Ollama model")
+    parser.add_argument("--research-model", default="qwen2.5:1.5b-instruct",
+                        help="Locally installed Ollama model for /research; no API key or cloud service")
     parser.add_argument("--candidate-id", default="", help="ID to correct or revoke in --mode revise")
     parser.add_argument("--question", default="", help="Question for strictly weights-only evaluation")
     parser.add_argument("--expected", default="", help="Optional expected answer for teacher-forced score")
@@ -1797,7 +1798,7 @@ def main():
 
     if args.mode == "session":
         run_session(args.data_dir, reader, writer, data, device, has_checkpoint,
-                    enable_research=args.enable_research, research_provider=args.research_provider)
+                    enable_research=args.enable_research, research_model=args.research_model)
         return
     if args.mode == "evaluate":
         if not args.weights_only:

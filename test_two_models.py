@@ -1,15 +1,21 @@
-"""Behavioral checks for the two-model Sonara vertical slice; no network or secrets."""
-import os
+"""Behavioral tests for Sonara's world owner and fully local research assistant."""
+import io
+import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
 import torch
 
+from LLM_Training import read_records, run_session
 from sonara_memory import SonaraMemorySystem
 from sonara_world import WorldCognition, parse_state
-from sonara_research import ResearchCognition, ResearchModel
+from sonara_research import (
+    DEFAULT_LOCAL_MODEL, LOCAL_ENDPOINT, ResearchCognition, ResearchModel,
+    ollama_local_generate,
+)
 
 
 class TwoModelTests(unittest.TestCase):
@@ -40,7 +46,6 @@ class TwoModelTests(unittest.TestCase):
         self.assertIn("time-qualified", restarted.answer_where("Where was the ball at 12:15?"))
 
     def test_time_order_across_timezone_offsets(self):
-        # 19:15 UTC is later than 12:00 -07:00, regardless of string order.
         self.world.observe("2026-10-13T12:00:00-07:00 The ball is in the yard.", "s")
         self.world.observe("2026-10-13T19:15:00+00:00 The ball is in the pond.", "s")
         self.assertIn("pond", self.world.answer_where("Where is the ball?"))
@@ -49,12 +54,13 @@ class TwoModelTests(unittest.TestCase):
         frame = parse_state("2026-10-13T12:15:00-07:00 Jake moved the ball to yard.",
                             "2026-10-13T23:00:00+00:00")
         self.assertEqual(frame["observed_at"], "2026-10-13T12:15:00-07:00")
-        self.assertIsNone(parse_state("A ball might be in some place.", "2026-10-13T23:00:00+00:00"))
+        self.assertIsNone(parse_state("A ball might be in some place.",
+                                       "2026-10-13T23:00:00+00:00"))
         moved = parse_state("Jake moved the ball from the yard to the pond.",
                             "2026-10-13T23:00:00+00:00")
         self.assertEqual(moved["location"], "pond")
         self.assertIsNone(parse_state("Jake took the ball from the yard.",
-                                      "2026-10-13T23:00:00+00:00"))
+                                       "2026-10-13T23:00:00+00:00"))
 
     def test_neural_learning_is_explicit_bounded_and_guarded(self):
         torch.manual_seed(8)
@@ -70,37 +76,76 @@ class TwoModelTests(unittest.TestCase):
             self.assertTrue((self.root / "world_model.pt").exists())
             self.assertIsNotNone(WorldCognition(self.memories, self.root).change_probability(
                 "The ball moved to yard."))
-        # Other events remain intact regardless of gradient acceptance.
         self.assertEqual(len(self.memories.memories), 10)
 
-    def test_research_feedback_updates_only_research_model(self):
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-test-token",
-                                     "ANTHROPIC_API_KEY": "", "GEMINI_API_KEY": ""}):
-            calls = []
-            def fake_api(provider, question):
-                calls.append((provider, question))
-                return "Hypothesis, not verified."
-            research = ResearchCognition(self.root, transport=fake_api)
-            result = research.research("Why does an object move?")
-            self.assertEqual(result["provider"], "openai")
-            self.assertEqual(result["status"], "unverified_external_evidence")
-            self.assertEqual(len(calls), 1)
-            trained = research.feedback(result["question"], result["provider"], 1.0)
-            self.assertTrue(trained["trained"])
-            self.assertLess(trained["utility_error_after"], trained["utility_error_before"])
-            self.assertTrue((self.root / "research_model.pt").exists())
-            self.assertIsInstance(ResearchCognition(self.root, transport=fake_api).model, ResearchModel)
-            self.assertEqual(len(self.memories.memories), 0)
-            self.assertFalse((self.root / "world_model.pt").exists())
+    def test_research_is_local_and_research_feedback_isolated(self):
+        calls = []
 
-    def test_research_cannot_send_without_explicit_configured_provider(self):
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": "",
-                                     "GEMINI_API_KEY": ""}):
-            research = ResearchCognition(self.root, transport=lambda *_: self.fail("called API"))
-            with self.assertRaisesRegex(ValueError, "No AI provider"):
-                research.research("Explain something")
-            with self.assertRaises(ValueError):
-                research.feedback("x", "openai", 2.0)
+        def fake_local(question, model):
+            calls.append((question, model))
+            return "One possible explanation; not verified."
+
+        research = ResearchCognition(self.root, transport=fake_local)
+        result = research.research("Why does an object move?")
+        self.assertEqual(result["model"], DEFAULT_LOCAL_MODEL)
+        self.assertEqual(result["status"], "unverified_local_model_output")
+        self.assertAlmostEqual(result["estimated_utility"], research.expected_utility(result["question"]), places=3)
+        self.assertEqual(calls, [("Why does an object move?", DEFAULT_LOCAL_MODEL)])
+        trained = research.feedback(result["question"], 1.0)
+        self.assertTrue(trained["trained"])
+        self.assertLess(trained["utility_error_after"], trained["utility_error_before"])
+        self.assertTrue((self.root / "research_utility_model.pt").exists())
+        reloaded = ResearchCognition(self.root, transport=fake_local)
+        self.assertIsInstance(reloaded.model, ResearchModel)
+        self.assertAlmostEqual(reloaded.expected_utility(result["question"]),
+                               research.expected_utility(result["question"]), places=6)
+        self.assertEqual(len(self.memories.memories), 0)
+        self.assertFalse((self.root / "world_model.pt").exists())
+
+    def test_ollama_transport_cannot_contact_external_providers(self):
+        with patch("sonara_research.urllib.request.build_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'{"response":"Local hypothesis"}')
+            answer = ollama_local_generate("Why does the ball move?", DEFAULT_LOCAL_MODEL)
+            self.assertEqual(answer, "Local hypothesis")
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, LOCAL_ENDPOINT)
+            payload = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(payload["model"], DEFAULT_LOCAL_MODEL)
+            self.assertEqual(payload["prompt"], "Why does the ball move?")
+            self.assertFalse(payload["stream"])
+            self.assertTrue(opener.called)
+        with patch("sonara_research.urllib.request.build_opener") as opener:
+            opener.return_value.open.side_effect = urllib.error.URLError("Connection refused")
+            with self.assertRaisesRegex(ValueError, "ollama serve"):
+                ollama_local_generate("Question?", DEFAULT_LOCAL_MODEL)
+        with self.assertRaises(ValueError):
+            ollama_local_generate("Question?", "https://example.com/injected")
+        with self.assertRaises(ValueError):
+            ResearchCognition(self.root).feedback("Question?", 2.0)
+
+    def test_live_session_local_research_is_unverified_and_never_promoted(self):
+        with patch("sonara_research.ollama_local_generate",
+                   return_value="A tentative explanation, not proof.") as generated:
+            with patch("builtins.input",
+                       side_effect=["/research Why does it float?", "/rate-research 0.8", "/quit"]):
+                run_session(self.root, None, None, None, None, False, enable_research=True)
+        generated.assert_called_once_with("Why does it float?", DEFAULT_LOCAL_MODEL)
+        research_rows = read_records(self.root / "research_events.jsonl")
+        rating_rows = read_records(self.root / "research_feedback.jsonl")
+        self.assertEqual(len(research_rows), 1)
+        self.assertEqual(len(rating_rows), 1)
+        self.assertEqual(research_rows[0]["source"], "local_model")
+        self.assertEqual(research_rows[0]["status"], "unverified_local_model_output")
+        self.assertEqual(len(SonaraMemorySystem(self.root / "sonara_memories").memories), 0)
+        self.assertFalse((self.root / "world_model.pt").exists())
+
+    def test_local_research_opt_in_and_no_server_needed_for_disabled_mode(self):
+        with patch("sonara_research.ollama_local_generate") as generated:
+            with patch("builtins.input", side_effect=["/research Why?", "/quit"]):
+                run_session(self.root, None, None, None, None, False, enable_research=False)
+            generated.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "1-4000"):
+            ResearchCognition(self.root, transport=lambda *_: self.fail("unexpected")).research("")
 
 
 if __name__ == "__main__":
