@@ -143,7 +143,7 @@ MIT License. Created by Logan Carton.
 
 ## Controlled experience-learning research (synthetic only)
 
-Run \`python experiment_experience_learning.py --seeds 1 --steps 60\` to compare
+Run `python experiment_experience_learning.py --seeds 1 --steps 60` to compare
 the existing trained reader/writer before and after synthetic Q/A supervision.
 The reproducible harness holds out entire actor–object combinations and reports:
 weights-only accuracy, memory retrieval **evidence coverage**, neural prediction
