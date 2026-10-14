@@ -18,9 +18,13 @@ from torch.nn import functional as F
 
 STATE_VERBS = r"(?:moved|carried|put|placed|dropped|threw|took|brought|rolled|retrieved)"
 ENTITY = r"[a-z][a-z0-9_-]*"
+TRANSFER = re.compile(
+    rf"\b{STATE_VERBS}\s+(?:the\s+|a\s+)?(?P<entity>{ENTITY})\s+"
+    rf"from\s+(?:the\s+|a\s+)?(?P<source>{ENTITY})\s+"
+    rf"to\s+(?:the\s+|a\s+)?(?P<place>{ENTITY})\b", re.I)
 CHANGE = re.compile(
     rf"\b{STATE_VERBS}\s+(?:the\s+|a\s+)?(?P<entity>{ENTITY})\s+"
-    rf"(?:to|into|in|at|on|from)\s+(?:the\s+|a\s+)?(?P<place>{ENTITY})\b", re.I)
+    rf"(?:to|into|in|at|on)\s+(?:the\s+|a\s+)?(?P<place>{ENTITY})\b", re.I)
 STATE = re.compile(
     rf"\b(?:the\s+|a\s+)?(?P<entity>{ENTITY})\s+(?:is|was|stayed|remains)\s+"
     rf"(?:in|at|on|inside)\s+(?:the\s+|a\s+)?(?P<place>{ENTITY})\b", re.I)
@@ -32,7 +36,7 @@ STOP = {"a", "the", "to", "at", "is", "was", "did", "go", "where"}
 
 def parse_state(text: str, recorded_at: str) -> dict | None:
     """Extract only explicitly asserted state, never invent a destination."""
-    match = CHANGE.search(text) or STATE.search(text)
+    match = TRANSFER.search(text) or CHANGE.search(text) or STATE.search(text)
     if not match:
         return None
     ts = TIME.search(text)
