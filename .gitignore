@@ -25,3 +25,13 @@ ENV/
 *.tmp
 *.bak
 *.swp
+
+
+# Private Sonara session records, synthetic experiment output, and checkpoints.
+# Note: ignore rules do not remove files already tracked by Git.
+learning_data/
+sonara_memories/
+test_sonara_memories/
+artifacts/
+*.pt
+*.pth
