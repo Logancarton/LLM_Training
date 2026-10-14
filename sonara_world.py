@@ -110,7 +110,7 @@ class WorldCognition:
             return f"Unknown: no explicit location observation for {entity}."
         # Compare instants, not ISO strings with different timezone offsets.
         observations.sort(key=lambda row: (datetime.fromisoformat(row[0]),
-                                           datetime.fromisoformat(row[1].timestamp_iso),
+                                           row[1].timestamp_epoch,
                                            row[1].id))
         _, evidence, state = observations[-1]
         probability = self.change_probability(evidence.content)
