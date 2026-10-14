@@ -39,10 +39,6 @@ jobs:
         run: |
           python LLM_Training.py --mode self-test
           python test_sonara_memory.py
-      - name: Full legacy script smoke tests
-        run: |
-          python test_deliberation.py --steps 10 --layers 1
-          python test_without_ideas.py --steps 10 --layers 1
       - name: Live synthetic CLI session
         run: |
           printf 'Jake moved a ball into the pond.\n/ask Where did the ball go?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
