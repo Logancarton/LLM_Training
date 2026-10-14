@@ -37,9 +37,19 @@ jobs:
         run: |
           python LLM_Training.py --mode self-test
           python test_sonara_memory.py
-      - name: Controlled experience benchmark
+      - name: Full legacy script smoke tests
         run: |
-          python experiment_experience_learning.py --seeds 1 --steps 60 --output artifacts/experience_learning_report.json
+          python test_deliberation.py --steps 10 --layers 1
+          python test_without_ideas.py --steps 10 --layers 1
+      - name: Live synthetic CLI session
+        run: |
+          printf 'Jake moved a ball into the pond.\n/ask Where did the ball go?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
+          grep -q 'UNVERIFIED NEURAL PREDICTION' "$RUNNER_TEMP/session_output.txt"
+      - name: Scoped diff whitespace check
+        run: git diff --check origin/main...HEAD
+      - name: Controlled experience benchmark (3 seeds)
+        run: |
+          python experiment_experience_learning.py --seeds 3 --steps 60 --output artifacts/experience_learning_report.json
       - name: Publish experiment data
         if: always()
         uses: actions/upload-artifact@v4
