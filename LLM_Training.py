@@ -1402,7 +1402,6 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
     print("Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "start", "timestamp": now_iso(), "local_user": "owner"})
     event_index = 0
-    last_prediction = None
     while True:
         try:
             line = input("You> ").strip()
@@ -1553,14 +1552,6 @@ def evaluate_weights_only(args, reader, writer, data, device):
     print("  Unknown input tokens:", sorted(set(personal_tokens(args.question)) - set(data["word_to_id"])))
 
 
-def show_thoughts(data_dir):
-    # Not model-initiated cognition. Transparent, opt-in review scaffolding.
-    pending = [r for r in latest_candidates(data_dir) if r["status"] in ("pending", "deferred")]
-    print(f"Candidate review queue: {len(pending)} items. These are heuristic reminders, not autonomous intentions.")
-    for row in pending[:12]:
-        print(f"  {row['id']} | {row['original_observation'][:90]}")
-
-
 # =====================================================================
 # 11A. REGRESSION TESTS — Local mechanism checks, no external test modules
 # =====================================================================
@@ -1679,7 +1670,7 @@ def main():
     parser.add_argument("--adapt-steps", type=int, default=18)
     parser.add_argument("--novel-idea", default="the dog follows the ball")
     parser.add_argument("--novel-detail", default="the dog walks slowly behind the ball .")
-    parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "thoughts", "self-test", "memories"), default="train")
+    parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "self-test", "memories"), default="train")
     parser.add_argument("--data-dir", default="learning_data", help="Local private session and approval files")
     parser.add_argument("--enable-research", action="store_true",
                         help="Enable explicit /research requests to a laptop-local Ollama model")
@@ -1717,9 +1708,6 @@ def main():
         return
     if args.mode == "review":
         show_review(args.data_dir, interactive=not args.noninteractive)
-        return
-    if args.mode == "thoughts":
-        show_thoughts(args.data_dir)
         return
     if args.mode == "timeline":
         show_timeline(args.data_dir)
@@ -1843,7 +1831,7 @@ def main():
 # =====================================================================
 
 def build_data(ideas_file=DEFAULT_IDEAS_FILE, details_file=DEFAULT_DETAILS_FILE, total=320):
-    """Build dataset dictionary compatible with test_deliberation.py and test_without_ideas.py."""
+    """Build dataset dictionary for the optional language-conditioning ablation."""
     min_needed = len(originals()) + len(extra_events()) + 20
     train, valid, _, _ = build_examples(total=max(min_needed, total), seed=7, external_ideas=ideas_file, external_details=details_file)
     data = encode_data(train, valid)
