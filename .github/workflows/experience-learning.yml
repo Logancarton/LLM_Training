@@ -7,6 +7,13 @@ on:
       - LLM_Training.py
       - sonara_memory.py
       - .github/workflows/experience-learning.yml
+  pull_request:
+    paths:
+      - experiment_experience_learning.py
+      - README.md
+      - LLM_Training.py
+      - sonara_memory.py
+      - .github/workflows/experience-learning.yml
   workflow_dispatch:
 
 jobs:
