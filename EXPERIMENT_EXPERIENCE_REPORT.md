@@ -1,7 +1,7 @@
 # Sonara Experience-Learning Experiment — Initial Research Report
 
-**Repository:** Logancarton/LLM_Training  
-**Evaluation:** 2026-10-13 (America/Phoenix) / 2026-10-14 (UTC)  
+**Repository:** Logancarton/LLM_Training
+**Evaluation:** 2026-10-13 (America/Phoenix) / 2026-10-14 (UTC)
 **Source:** GitHub Actions run [38499704311](https://github.com/Logancarton/LLM_Training/actions/runs/38499704311), artifact "experience-learning-results".
 
 ## Verdict
