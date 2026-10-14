@@ -97,7 +97,8 @@ class WorldCognition:
             return None
         entity = match["entity"].lower()
         observations = []
-        for memory in self.memories.memories.values():
+        for memory_id in self.memories.entity_index.get(entity, ()):
+            memory = self.memories.memories[memory_id]
             if memory.category != "episodic" or memory.source != "user_observation":
                 continue
             state = memory.semantic_frame
