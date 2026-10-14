@@ -5,16 +5,16 @@ sonara_memory.py — Structured Episodic & Semantic Memory System for Sonara
 PURPOSE
     Provides Sonara with persistent, timestamped, retrievable memory:
       1. EPISODIC MEMORY: Timestamped logs of events, observations, and conversations.
-      2. SEMANTIC MEMORY: Consolidated facts, concepts, and relationships.
+      2. SEMANTIC MEMORY: Explicitly sourced factual records, not automatically inferred knowledge.
       3. PREFERENCE MEMORY: User preferences, habits, and communication styles.
-      4. REFLECTION MEMORY: Self-synthesized insights generated during deliberation.
+      4. LEGACY REFLECTIONS: Previously stored heuristic text; not a trusted inference source.
 
 FEATURES
     - High-resolution ISO-8601 timestamps, local readable formats, and relative times ("3 minutes ago").
     - Cognitive retrieval: Composite scoring balancing Content Relevance, Recency Decay, and Importance.
-    - Semantic Frame mapping: Aligned with Sonara's IdeaReader (WHO / ACTION / WHAT / WHERE / WHEN).
+    - Explicit semantic frames only: raw text is not silently converted to knowledge.
     - Entity indexing for fast multi-hop or associative recall.
-    - Memory Consolidation / Reflection: Turns clusters of episodic events into durable knowledge.
+    - No automatic reflection or promotion of lexical repetition into knowledge.
     - Persistent storage: Append-only JSONL log + Human-readable Markdown Journal.
     - Interactive CLI and drop-in integration with LLM_Training.py sessions.
 """
@@ -136,46 +136,6 @@ def extract_entities(text: str) -> List[str]:
     return result[:8]
 
 
-def infer_semantic_frame(text: str) -> Dict[str, str]:
-    """
-    Attempt to map text into Sonara's standard IdeaReader frame:
-    WHO / ACTION / WHAT / WHERE / WHEN
-    """
-    frame = {"who": "none", "action": "none", "what": "none", "where": "none", "when": "none"}
-    cleaned = text.strip().rstrip(".!?")
-
-    # If the user supplied explicit pipe format: "Jake | chases | the ball"
-    if "|" in cleaned:
-        parts = [p.strip() for p in cleaned.split("|")]
-        if len(parts) >= 2:
-            frame["who"] = parts[0]
-            frame["action"] = parts[1]
-        if len(parts) >= 3:
-            frame["what"] = parts[2]
-        return frame
-
-    tokens = cleaned.split()
-    if not tokens:
-        return frame
-
-    # Heuristic parsing for simple English expressions
-    first_two = " ".join(tokens[:2]).lower()
-    if first_two.startswith("the ") or first_two.startswith("my "):
-        if len(tokens) >= 3:
-            frame["who"] = tokens[1]
-            frame["action"] = tokens[2]
-            if len(tokens) >= 4:
-                frame["what"] = " ".join(tokens[3:])
-    else:
-        frame["who"] = tokens[0]
-        if len(tokens) >= 2:
-            frame["action"] = tokens[1]
-        if len(tokens) >= 3:
-            frame["what"] = " ".join(tokens[2:])
-
-    return frame
-
-
 # =====================================================================
 # 4. SONARA MEMORY SYSTEM
 # =====================================================================
@@ -260,7 +220,9 @@ class SonaraMemorySystem:
         if entities is None:
             entities = extract_entities(content)
         if semantic_frame is None:
-            semantic_frame = infer_semantic_frame(content)
+            # No guessed WHO/ACTION/WHAT frame: unverified text is evidence,
+            # not automatically understood semantic structure.
+            semantic_frame = {}
 
         # Automatic importance boost for explicit user preferences or core facts
         lower_content = content.lower()
@@ -317,6 +279,10 @@ class SonaraMemorySystem:
         decay_constant = math.log(2) / max(half_life_sec, 1.0)
 
         for mem in self.memories.values():
+            # Legacy auto-reflections remain in the append-only history, but
+            # are not treated as trustworthy evidence for recall.
+            if mem.source == "sonara_reflection":
+                continue
             if category and mem.category != category:
                 continue
 
@@ -400,53 +366,6 @@ class SonaraMemorySystem:
         return timeline
 
     # -----------------------------------------------------------------
-    # COGNITIVE CONSOLIDATION / REFLECTION
-    # -----------------------------------------------------------------
-
-    def reflect(self) -> List[Memory]:
-        """
-        Consolidates recent episodic memories into semantic knowledge.
-        Finds repeated entities, patterns, and themes.
-        """
-        recent = self.get_recent(limit=30, category="episodic")
-        if len(recent) < 2:
-            return []
-
-        entity_counts: Dict[str, List[Memory]] = {}
-        for m in recent:
-            for ent in m.entities:
-                key = ent.lower()
-                entity_counts.setdefault(key, []).append(m)
-
-        new_reflections = []
-        # Find entities appearing in multiple episodic memories
-        for ent_name, cluster in entity_counts.items():
-            if len(cluster) >= 2:
-                # Check if we already reflected on this recently
-                already_reflected = any(
-                    ent_name in r.entities for r in self.memories.values() if r.category == "reflection"
-                )
-                if already_reflected:
-                    continue
-
-                summary_snippets = [c.content for c in cluster[:3]]
-                reflection_content = (
-                    f"Sonara observes frequent experiences with '{ent_name}': "
-                    + "; ".join(summary_snippets)
-                )
-
-                ref_mem = self.remember(
-                    content=reflection_content,
-                    category="reflection",
-                    source="sonara_reflection",
-                    importance=7.5,
-                    entities=[ent_name],
-                )
-                new_reflections.append(ref_mem)
-
-        return new_reflections
-
-    # -----------------------------------------------------------------
     # MARKDOWN JOURNAL EXPORT
     # -----------------------------------------------------------------
 
@@ -526,7 +445,6 @@ def interactive_cli():
     parser.add_argument("--remember", default="", help="Save a memory directly")
     parser.add_argument("--recall", default="", help="Query memories")
     parser.add_argument("--timeline", action="store_true", help="Print memory timeline")
-    parser.add_argument("--reflect", action="store_true", help="Consolidate recent memories")
     args = parser.parse_args()
 
     memory = SonaraMemorySystem(args.dir)
@@ -560,13 +478,6 @@ def interactive_cli():
             print(f"    \"{item['content']}\"")
         return
 
-    if args.reflect:
-        reflections = memory.reflect()
-        print(f"\nConsolidation complete: Generated {len(reflections)} new reflections.")
-        for r in reflections:
-            print(f"  - [{r.timestamp_human}] {r.content}")
-        return
-
     # Default: Interactive shell for testing Sonara's memory
     print("=" * 65)
     print("      SONARA MEMORY CONSOLE — Interactive Memory Manager")
@@ -578,7 +489,6 @@ def interactive_cli():
     print("  /pref <text>       - Save a user preference")
     print("  /recall <query>    - Search memories with cognitive scoring")
     print("  /timeline          - Show chronological memories")
-    print("  /reflect           - Consolidate experiences into insights")
     print("  /quit              - Exit")
     print("=" * 65)
 
@@ -624,15 +534,6 @@ def interactive_cli():
                 print("No memories recorded yet.")
             for it in items:
                 print(f"  [{it['timestamp_human']}] ({it['relative_time']}) [{it['category']}] {it['content']}")
-
-        elif line == "/reflect":
-            refs = memory.reflect()
-            if not refs:
-                print("No new reflections could be consolidated (requires at least 2 related episodic events).")
-            else:
-                print(f"Consolidated {len(refs)} new reflection(s):")
-                for r in refs:
-                    print(f"  • {r.content}")
 
         else:
             # Natural input defaults to saving as episodic memory

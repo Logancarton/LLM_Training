@@ -813,7 +813,7 @@ def validation(stage, model, reader, valid, pad_id, device, batch_size, ablate=F
 
 
 def train_stage(stage, model, reader, data, args, device):
-    name = {1: "WORD PREDICTION", 2: "SITUATION UNDERSTANDING", 3: "IDEA-GUIDED WRITING"}[stage]
+    name = {1: "WORD PREDICTION", 2: "SYNTHETIC ROLE-LABEL FIT", 3: "IDEA-CONDITIONED WRITING"}[stage]
     pad_id = data["word_to_id"][PAD]
     print(f"\n=== STAGE {stage}: {name} ===", flush=True)
     epochs = args.idea_epochs if stage == 2 else args.epochs
@@ -843,14 +843,14 @@ def train_stage(stage, model, reader, data, args, device):
                 updates += 1
             if total_items:
                 valid_loss, acc, _ = validation(stage, model, reader, data["valid"], pad_id, device, args.batch_size)
-                extra = f" | meaning accuracy {acc:.1%}" if acc is not None else ""
+                extra = f" | synthetic-label accuracy {acc:.1%}" if acc is not None else ""
                 print(f"  epoch {epoch}/{epochs} | updates {updates} | train loss {total_loss / total_items:.3f} | validation loss {valid_loss:.3f}{extra}", flush=True)
             if args.steps is not None and updates >= args.steps:
                 break
     v, a, shuffled = validation(stage, model, reader, data["valid"], pad_id, device, args.batch_size, ablate=stage == 3)
-    print(f"  final validation loss: {v:.3f}" + (f" | meaning accuracy: {a:.1%}" if a is not None else ""))
+    print(f"  final validation loss: {v:.3f}" + (f" | synthetic-label accuracy: {a:.1%}" if a is not None else ""))
     if shuffled is not None:
-        print(f"  causal check: wrong/shuffled idea loss {shuffled:.3f} vs correct-idea loss {v:.3f}")
+        print(f"  conditioning ablation: wrong/shuffled idea loss {shuffled:.3f} vs correct-idea loss {v:.3f}")
         print("  (If losses are similar, the writer is not reliably using its idea signal.)")
     return v
 
@@ -1390,20 +1390,18 @@ def learn_approved(data_dir, args, data, word_model, reader, writer, device):
 # =====================================================================
 
 
-def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_research=False, research_model="qwen2.5:1.5b-instruct"):
+def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-instruct"):
     session_id = uuid.uuid4().hex[:12]
     from sonara_memory import SonaraMemorySystem
-    from sonara_world import WorldCognition
     from sonara_research import ResearchCognition
     mem_sys = SonaraMemorySystem(Path(data_dir) / "sonara_memories")
-    world = WorldCognition(mem_sys, data_dir)
     research = ResearchCognition(data_dir, local_model=research_model) if enable_research else None
     last_research = None
-    print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline | /reflect | /feedback")
-    print("World: /train-world (bounded experiment). Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
+    print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline")
+    print("World reasoning: NOT IMPLEMENTED. No programmed location/temporal answers or auto-trained world classifier.")
+    print("Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "start", "timestamp": now_iso(), "local_user": "owner"})
     event_index = 0
-    last_prediction = None
     while True:
         try:
             line = input("You> ").strip()
@@ -1414,8 +1412,7 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_r
         if not line:
             continue
         if line == "/train-world":
-            metrics = world.learn_bounded()
-            print("Sonara> World training:", json.dumps(metrics, sort_keys=True))
+            print("Sonara> Retired: rule-labeled classifier was not evidence of world learning. No weights changed.")
             continue
         if line.startswith("/research "):
             if research is None:
@@ -1451,21 +1448,12 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_r
             print("Sonara> Local research utility feedback:", json.dumps(metrics, sort_keys=True))
             continue
         if line.startswith("/feedback "):
-            correction = line[len("/feedback "):].strip()
-            if last_prediction is None or not correction:
-                print("Feedback requires a previous prediction and a correction/comment")
-                continue
-            append_record(Path(data_dir) / "feedback.jsonl", {
-                "id": uuid.uuid4().hex[:12], "timestamp": now_iso(),
-                "session_id": session_id, "prediction_id": last_prediction["id"],
-                "user_feedback": correction, "status": "unverified-user-feedback",
-            })
-            world.observe(correction, session_id)
-            print("Feedback saved as an attributed observation, not automatically trained")
+            print("Sonara> No world-model prediction exists to correct. "
+                  "Use /remember <observation> or approve supervised Q/A in --mode review.")
             continue
         if line.startswith("/remember "):
             text = line[len("/remember "):].strip()
-            mem = world.observe(text, session_id)
+            mem = mem_sys.remember(text, category="episodic", source="user_observation", session_id=session_id)
             print(f"Sonara> Memory saved: [{mem.timestamp_human}] ({mem.relative_time()})")
             print(f"        ID: {mem.id} | Entities: {mem.entities}")
             continue
@@ -1489,13 +1477,8 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_r
                     print(f"  • {it['timestamp_human']} ({it['relative_time']}) [{it['category']}] {it['content']}")
             continue
         if line.strip() == "/reflect":
-            reflections = mem_sys.reflect()
-            if not reflections:
-                print("Sonara> No new reflections consolidated yet (requires repeated experiences with entities).")
-            else:
-                print(f"Sonara> Consolidated {len(reflections)} new reflection(s):")
-                for r in reflections:
-                    print(f"  • [{r.timestamp_human}] {r.content}")
+            print("Sonara> Disabled: repeated words are not learned insights. "
+                  "Legacy records remain archived, not promoted to verified knowledge.")
             continue
 
         event_index += 1
@@ -1506,41 +1489,28 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_r
                   "timestamp": now_iso(), "event_index": event_index, "text": line, "type": "question" if ask else "observation"}
         append_record(Path(data_dir) / "events.jsonl", record)
         if not ask:
-            mem = world.observe(line, session_id)
+            mem = mem_sys.remember(line, category="episodic", source="user_observation", session_id=session_id)
             create_candidate(data_dir, record)
-            response = f"Memory saved at {mem.timestamp_human} ({mem.relative_time()}). Observation queued for learning review."
+            response = (f"Observation stored at {mem.timestamp_human} ({mem.relative_time()}). "
+                        "Optional supervised Q/A candidate created; NO neural training occurred.")
         else:
-            # World-state queries take evidence from the canonical memory log.
-            # The neural state estimator is experimental and never overrides evidence.
-            world_answer = world.answer_where(line)
-            if world_answer is not None:
-                response = world_answer
-            else:
-                recalled = mem_sys.recall(line, limit=2)
-                mem_note = ""
-                if recalled and recalled[0][1] >= 0.35:
-                    top_m, top_s = recalled[0]
-                    mem_note = f'\n  [Sonara recalled from memory ({top_m.relative_time()}): "{top_m.content}"]'
-                if has_checkpoint:
-                    reply = answer_with_weights(reader, writer, line, data, device)
-                    response = "UNVERIFIED NEURAL PREDICTION: " + reply + mem_note
-                elif recalled and recalled[0][1] >= 0.35:
-                    response = f'From memory ({recalled[0][0].relative_time()}): "{recalled[0][0].content}"'
-                else:
-                    response = "No trained checkpoint or memory found; the answer is unknown."
+            # Abstain rather than route natural-language questions through
+            # programmed temporal answers or a synthetic phrase generator.
+            # Raw memory is available separately with explicit provenance.
+            response = ("UNKNOWN: No trained world-question answering mechanism has been "
+                        "validated. Use /recall <terms> to inspect recorded evidence. "
+                        "The language-training checkpoint is not a knowledge authority.")
 
         print("Sonara>", response)
         answer_record = {
             "id": uuid.uuid4().hex[:12], "source": "model", "timestamp": now_iso(),
             "session_id": session_id, "event_index": event_index, "text": response,
-            "type": "prediction" if ask else "acknowledgement",
-            "verification": "unverified" if ask else "no-claim", "input_id": record["id"],
+            "type": "abstention" if ask else "acknowledgement",
+            "verification": "unknown" if ask else "no-claim", "input_id": record["id"],
         }
         append_record(Path(data_dir) / "events.jsonl", answer_record)
-        if ask:
-            last_prediction = answer_record
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "end", "timestamp": now_iso()})
-    print("Session closed. Run --mode review before training.")
+    print("Session closed. No automatic learning or knowledge promotion occurred.")
 
 
 # =====================================================================
@@ -1580,14 +1550,6 @@ def evaluate_weights_only(args, reader, writer, data, device):
         except ValueError as error:
             print("  Cannot score supplied answer:", error)
     print("  Unknown input tokens:", sorted(set(personal_tokens(args.question)) - set(data["word_to_id"])))
-
-
-def show_thoughts(data_dir):
-    # Not model-initiated cognition. Transparent, opt-in review scaffolding.
-    pending = [r for r in latest_candidates(data_dir) if r["status"] in ("pending", "deferred")]
-    print(f"Candidate review queue: {len(pending)} items. These are heuristic reminders, not autonomous intentions.")
-    for row in pending[:12]:
-        print(f"  {row['id']} | {row['original_observation'][:90]}")
 
 
 # =====================================================================
@@ -1708,7 +1670,7 @@ def main():
     parser.add_argument("--adapt-steps", type=int, default=18)
     parser.add_argument("--novel-idea", default="the dog follows the ball")
     parser.add_argument("--novel-detail", default="the dog walks slowly behind the ball .")
-    parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "thoughts", "self-test", "memories"), default="train")
+    parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "self-test", "memories"), default="train")
     parser.add_argument("--data-dir", default="learning_data", help="Local private session and approval files")
     parser.add_argument("--enable-research", action="store_true",
                         help="Enable explicit /research requests to a laptop-local Ollama model")
@@ -1747,9 +1709,6 @@ def main():
     if args.mode == "review":
         show_review(args.data_dir, interactive=not args.noninteractive)
         return
-    if args.mode == "thoughts":
-        show_thoughts(args.data_dir)
-        return
     if args.mode == "timeline":
         show_timeline(args.data_dir)
         return
@@ -1771,6 +1730,13 @@ def main():
         if not args.candidate_id:
             raise ValueError("--candidate-id is required for --mode revise")
         revise_candidate(args.data_dir, args.candidate_id)
+        return
+    # Session is a lightweight evidence recorder plus explicit local research.
+    # Never initialize synthetic language training or load its weights as a
+    # stand-in for grounded world cognition.
+    if args.mode == "session":
+        run_session(args.data_dir, enable_research=args.enable_research,
+                    research_model=args.research_model)
         return
     training, valid, originals_count, synth_count = build_examples(args.examples, args.seed, args.ideas_file, args.details_file)
     data = encode_data(training, valid)
@@ -1796,10 +1762,6 @@ def main():
             raise FileNotFoundError(f"Checkpoint missing: {args.checkpoint}. Run --mode train first.")
         load_checkpoint(args.checkpoint, data, args, word_model, reader, writer, device)
 
-    if args.mode == "session":
-        run_session(args.data_dir, reader, writer, data, device, has_checkpoint,
-                    enable_research=args.enable_research, research_model=args.research_model)
-        return
     if args.mode == "evaluate":
         if not args.weights_only:
             raise ValueError("Evaluation requires --weights-only; personal files are never consulted")
@@ -1869,7 +1831,7 @@ def main():
 # =====================================================================
 
 def build_data(ideas_file=DEFAULT_IDEAS_FILE, details_file=DEFAULT_DETAILS_FILE, total=320):
-    """Build dataset dictionary compatible with test_deliberation.py and test_without_ideas.py."""
+    """Build dataset dictionary for the optional language-conditioning ablation."""
     min_needed = len(originals()) + len(extra_events()) + 20
     train, valid, _, _ = build_examples(total=max(min_needed, total), seed=7, external_ideas=ideas_file, external_details=details_file)
     data = encode_data(train, valid)
@@ -1924,21 +1886,6 @@ def write_detail(writer, idea_vector, data, max_words=36):
     if idea_vector is not None:
         idea_vector = idea_vector.to(device)
     return generate(writer, idea_vector, data, device, trace=False, max_words=max_words)
-
-
-def generate_with_assessment(writer, reader, idea_text, data, max_steps=18):
-    device = next(writer.parameters()).device
-    vector, meaning = inspect_idea(reader, idea_text, data, device)
-    print("\n" + "-" * 70)
-    print("DELIBERATIVE STEP-BY-STEP REASONING LOOP (Assess -> Create -> Verify)")
-    print("-" * 70)
-    print(f'Target Idea:  "{idea_text}"')
-    print("Goal State:   " + " | ".join(f"{k} = {v}" for k, v in meaning.items()))
-    print("-" * 70)
-    out = generate(writer, vector, data, device, trace=True, max_words=max_steps)
-    print("-" * 70)
-    print(f'Final output: "{out}"\n')
-    return out
 
 
 if __name__ == "__main__":
