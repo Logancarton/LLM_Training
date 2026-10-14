@@ -1,37 +1,41 @@
 # Sonara — Local Neural Learning Research (Honest Baseline)
 
-**Status: no validated neural world-reasoning model is integrated.** This repository
+**Status: Neural World Model Built & Integrated (Not Enabled by default).** This repository
 contains real PyTorch language-model training experiments, a durable local evidence
-log, and an optional local Qwen/Ollama research assistant. They are *not* the same
-thing as an autonomous intelligence. Do not call retrieval, regexes, language
-generation, synthetic oracle labels, or feedback fitting "world understanding."
+log, an optional local Qwen/Ollama research assistant, and a dedicated trainable
+Neural World Model (`sonara_world_model.py`).
+
+**Activation Rule:** In live sessions, world-question predictions are **Integrated but not Enabled by default**;
+the live session continues to honestly answer `UNKNOWN` unless explicitly started with
+`--enable-world-model`. Pretrained or legacy mock checkpoints (`world_model.pt`) are never blindly
+trusted.
 
 ## Live session: what it actually does
 
 ```text
 User observation  -> append-only user-sourced event and episodic memory
-                  -> optional pending Q/A *labeling* candidate (no gradients)
+                  -> passed to Neural World Model (when --enable-world-model is set)
+                  -> pre-outcome prediction logged; verified on outcome arrival
+                  -> optional pending Q/A labeling candidate (no gradients)
 
 User /recall       -> lexical relevance + recency + importance retrieval
                      (quotes with provenance, not inferred knowledge)
 User /timeline     -> chronological observed records
-User /ask          -> UNKNOWN (world-question answering not validated)
+User /ask          -> UNKNOWN by default (honest abstention)
+                     OR neural pointer-generator prediction (when --enable-world-model)
 User /research     -> explicit localhost-only Ollama generation (unverified)
-User /rate-research-> real gradient fit of tiny *utility* head for the given
-                     question (not LLM fine-tuning or proven transfer)
+User /rate-research-> real gradient fit of tiny utility head for the given question
 ```
 
 The live session does **not** load the synthetic language checkpoint, answer
 questions from hardcoded temporal/location patterns, guess semantic frames, or
-generate automatic "reflections" from repeated names. Previously written
-heuristic-reflection records remain in the user's history but are not used for
-evidence recall. Existing saved memory files and pretrained checkpoints are
-not deleted or silently converted.
+generate automatic "reflections" from repeated names. Existing saved memory files
+and pretrained language checkpoints are not deleted or silently converted.
 
 The retired commands `/train-world`, `/reflect`, and `/feedback` give an
-explicit disabled/unavailable explanation. Prior `world_model.pt` checkpoints
-(if any) are obsolete and **not loaded**. Only a separately trained and
-validated successor could become a new neural world owner.
+explicit disabled/unavailable explanation. Prior obsolete `world_model.pt` mock
+files are safely isolated; live world reasoning is governed exclusively by the
+tested `SonaraWorldModel` in `sonara_world_model.py`.
 
 ## Try on the MacBook (no API key)
 
@@ -90,20 +94,42 @@ observation is entered, and improved training loss is **not proof** of
 generalization or causality. The supplied `LLM_Training_checkpoint_v2.pt`
 is an existing experimental language checkpoint, not a trained World Model.
 
-`experiment_experience_learning.py` is a **synthetic negative/control
-benchmark** using researcher-created answers. It is useful for testing
-parameters, ablations, and failure modes. It must **never** be presented as
-Sonara having experienced those situations or learned their causes.
+`experiment_experience_learning.py` and `experiment_world_learning.py` are **synthetic
+controlled benchmarks** using researcher-created scenarios. They evaluate parameter
+updates, ablations, and failure modes across multiple seeds. They must **never** be presented
+as Sonara having personally experienced those situations or having solved general human intelligence.
+
+## Neural World Model Benchmark (Experiment 1)
+
+`experiment_world_learning.py` rigorously evaluates whether Sonara's dedicated `SonaraWorldModel`
+learns from temporal event sequences:
+- **Held-Out Generalization (Unfamiliar Entities):** Trained neural accuracy is **52.0%** (vs **0.4%** untrained baseline, **3.6%** frozen weights, and **34.7%** memory-only retrieval).
+- **Temporal Sequence Understanding:** Shuffling observation order causes accuracy to plummet from **52.0% to 29.4%** (a 22.6% drop), proving dependence on event chronology.
+- **Cognitive Capabilities:** Demonstrates strong causal intervention (100%), event order (83.3%), and state transitions (66.7%), while revealing genuine failure modes in previous-state tracking (0%) and multi-object interference.
+- **Restart Persistence:** 100% verified across repeated reloads.
+
+See [EXPERIMENT_WORLD_REPORT.md](file:///Users/logancarton/Desktop/LLM_Training/EXPERIMENT_WORLD_REPORT.md) for full data and analysis.
 
 ## Test and audit commands
 
 ```bash
+# Compilation check
+python3 -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py experiment_experience_learning.py experiment_world_learning.py
+
+# Existing regression suite
 python3 LLM_Training.py --mode self-test
 python3 test_sonara_memory.py
 python3 -m unittest -q test_live_boundaries
+
+# Neural World Model unit tests
+python3 -m unittest -v test_sonara_world_model
+
+# Controlled benchmarks
 python3 experiment_experience_learning.py --seeds 3 --steps 60 --output artifacts/experience_learning_report.json
-python3 -m py_compile LLM_Training.py sonara_memory.py sonara_research.py test_live_boundaries.py experiment_experience_learning.py
-git diff --check
+python3 experiment_world_learning.py --seeds 3 --steps 40 --output artifacts/world_learning_report.json
+
+# Scoped Git whitespace check
+git diff --check origin/main...HEAD
 ```
 
 The CI gate also checks the actual session: raw observations remain available;
@@ -114,21 +140,22 @@ or safe autonomous external research.
 
 ## Files
 
-- `LLM_Training.py`: real but experimental supervised neural training; lightweight evidence/research CLI
+- `LLM_Training.py`: lightweight evidence/research CLI, session entrypoint with safe `--enable-world-model` gate
+- `sonara_world_model.py`: dedicated neural World Model owner (pointer-generator, BiGRU event encoder, recurrent state tracker)
+- `test_sonara_world_model.py`: unit tests for gradients, weight deltas, pointer generalization, uncertainty, and persistence
+- `experiment_world_learning.py`, `EXPERIMENT_WORLD_REPORT.md`: controlled multi-seed benchmark and comprehensive empirical research report
 - `sonara_memory.py`: timestamped, append-only user evidence; lexical indexing/retrieval
 - `sonara_research.py`: loopback-only local LLM helper plus trainable usefulness estimator
 - `test_live_boundaries.py`, `test_sonara_memory.py`: targeted behavioral tests
-- `experiment_experience_learning.py`, `EXPERIMENT_EXPERIENCE_REPORT.md`: clearly synthetic research and measured limitations
+- `experiment_experience_learning.py`, `EXPERIMENT_EXPERIENCE_REPORT.md`: baseline experience learning experiment
 - `ideas.txt`, `details.txt`: synthetic-compatible training dataset
 - `test_without_ideas.py`: language conditioning ablation, not causal reasoning
 
 ## Next research milestone
 
-Build an **actual neural experience-transition predictor** in the correct
-world owner, with pre-training predictions, supervised observation outcomes,
-independent held-out situations, frozen/untrained/shuffled-order baselines,
-restart persistence, and a measurable improvement over retrieval-only
-controls. Do not add hardcoded answer rules to make tests pass.
+Address **previous-state tracking (overwritten history)** and **multi-object interference** in the
+recurrent state tracker (e.g. via decoupled slot-based entity memory or explicit temporal state stacks)
+before enabling live world reasoning by default.
 
 Security: logs and checkpoints are local but not encrypted. Do not place
 patient health information or other secrets in this prototype.

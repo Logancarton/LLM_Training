@@ -1390,15 +1390,29 @@ def learn_approved(data_dir, args, data, word_model, reader, writer, device):
 # =====================================================================
 
 
-def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-instruct"):
+def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-instruct",
+                enable_world_model=False, world_checkpoint=""):
     session_id = uuid.uuid4().hex[:12]
     from sonara_memory import SonaraMemorySystem
     from sonara_research import ResearchCognition
+    from sonara_world_model import SonaraWorldModel
     mem_sys = SonaraMemorySystem(Path(data_dir) / "sonara_memories")
     research = ResearchCognition(data_dir, local_model=research_model) if enable_research else None
-    last_research = None
+    world_model = None
+    if enable_world_model:
+        world_ckpt = Path(world_checkpoint) if world_checkpoint else (Path(data_dir) / "world_model.pt")
+        try:
+            world_model = SonaraWorldModel(checkpoint_path=world_ckpt if world_ckpt.exists() else None, device="cpu")
+        except Exception as error:
+            print(f"[Sonara] Warning: world model checkpoint not loaded: {error}")
+            world_model = None
+    pending_expectation = None
+
     print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline")
-    print("World reasoning: NOT IMPLEMENTED. No programmed location/temporal answers or auto-trained world classifier.")
+    if enable_world_model and world_model is not None:
+        print("World reasoning: NEURAL WORLD MODEL ACTIVE (pointer-generator state tracker).")
+    else:
+        print("World reasoning: NOT IMPLEMENTED. No programmed location/temporal answers or auto-trained world classifier.")
     print("Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "start", "timestamp": now_iso(), "local_user": "owner"})
     event_index = 0
@@ -1412,7 +1426,28 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
         if not line:
             continue
         if line == "/train-world":
-            print("Sonara> Retired: rule-labeled classifier was not evidence of world learning. No weights changed.")
+            if enable_world_model and world_model is not None:
+                approved = [r for r in latest_candidates(data_dir) if r.get("status") == "approved" and r.get("question") and r.get("answer")]
+                if not approved:
+                    print("Sonara> No approved training candidates found in candidates.jsonl.")
+                    continue
+                trained = 0
+                for r in approved:
+                    ev_list = [r.get("original_observation", "")]
+                    world_model.learn_step(ev_list, r["question"], r["answer"])
+                    trained += 1
+                world_model.save_checkpoint()
+                print(f"Sonara> Neural World Model trained on {trained} candidate(s); checkpoint saved.")
+            else:
+                print("Sonara> Retired: rule-labeled classifier was not evidence of world learning. No weights changed.")
+            continue
+        if line.startswith("/predict "):
+            if world_model is None:
+                print("Sonara> World model is not enabled. Start with --enable-world-model.")
+                continue
+            pred_q = line[len("/predict "):].strip()
+            pred = world_model.predict(pred_q)
+            print(f"Sonara> NEURAL PREDICTION: {pred.answer} (confidence={pred.confidence:.2f}, uncertainty={pred.uncertainty:.2f})")
             continue
         if line.startswith("/research "):
             if research is None:
@@ -1454,6 +1489,8 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
         if line.startswith("/remember "):
             text = line[len("/remember "):].strip()
             mem = mem_sys.remember(text, category="episodic", source="user_observation", session_id=session_id)
+            if world_model is not None:
+                world_model.observe(text)
             print(f"Sonara> Memory saved: [{mem.timestamp_human}] ({mem.relative_time()})")
             print(f"        ID: {mem.id} | Entities: {mem.entities}")
             continue
@@ -1491,22 +1528,45 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
         if not ask:
             mem = mem_sys.remember(line, category="episodic", source="user_observation", session_id=session_id)
             create_candidate(data_dir, record)
+            if world_model is not None:
+                if pending_expectation is not None:
+                    # Calculate prediction error against verified observation
+                    pred_err = 0.0 if pending_expectation.get("expected_entity", "").lower() in line.lower() else 1.0
+                    append_record(Path(data_dir) / "events.jsonl", {
+                        "id": uuid.uuid4().hex[:12], "source": "world_model", "timestamp": now_iso(),
+                        "session_id": session_id, "event_index": event_index,
+                        "type": "prediction_verification",
+                        "expectation": pending_expectation,
+                        "observed": line,
+                        "error": pred_err,
+                    })
+                    pending_expectation = None
+                world_model.observe(line)
             response = (f"Observation stored at {mem.timestamp_human} ({mem.relative_time()}). "
                         "Optional supervised Q/A candidate created; NO neural training occurred.")
         else:
-            # Abstain rather than route natural-language questions through
-            # programmed temporal answers or a synthetic phrase generator.
-            # Raw memory is available separately with explicit provenance.
-            response = ("UNKNOWN: No trained world-question answering mechanism has been "
-                        "validated. Use /recall <terms> to inspect recorded evidence. "
-                        "The language-training checkpoint is not a knowledge authority.")
+            if enable_world_model and world_model is not None:
+                pred = world_model.predict(line)
+                if pred.answer != "unknown" and pred.confidence >= 0.25 and pred.uncertainty < 2.2:
+                    response = f"NEURAL WORLD PREDICTION: {pred.answer} (confidence={pred.confidence:.2f}, uncertainty={pred.uncertainty:.2f})"
+                else:
+                    response = (f"UNKNOWN: Neural World Model uncertainty is high ({pred.uncertainty:.2f}) or missing observation. "
+                                "Use /recall <terms> to inspect recorded evidence.")
+            else:
+                # Abstain rather than route natural-language questions through
+                # programmed temporal answers or a synthetic phrase generator.
+                # Raw memory is available separately with explicit provenance.
+                response = ("UNKNOWN: No trained world-question answering mechanism has been "
+                            "validated. Use /recall <terms> to inspect recorded evidence. "
+                            "The language-training checkpoint is not a knowledge authority.")
 
         print("Sonara>", response)
         answer_record = {
             "id": uuid.uuid4().hex[:12], "source": "model", "timestamp": now_iso(),
             "session_id": session_id, "event_index": event_index, "text": response,
-            "type": "abstention" if ask else "acknowledgement",
-            "verification": "unknown" if ask else "no-claim", "input_id": record["id"],
+            "type": "neural_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response) else ("abstention" if ask else "acknowledgement"),
+            "verification": "unverified_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response) else ("unknown" if ask else "no-claim"),
+            "input_id": record["id"],
         }
         append_record(Path(data_dir) / "events.jsonl", answer_record)
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "end", "timestamp": now_iso()})
@@ -1676,6 +1736,10 @@ def main():
                         help="Enable explicit /research requests to a laptop-local Ollama model")
     parser.add_argument("--research-model", default="qwen2.5:1.5b-instruct",
                         help="Locally installed Ollama model for /research; no API key or cloud service")
+    parser.add_argument("--enable-world-model", action="store_true",
+                        help="Enable experimental neural World Model in live session")
+    parser.add_argument("--world-checkpoint", default="",
+                        help="Path to neural World Model checkpoint")
     parser.add_argument("--candidate-id", default="", help="ID to correct or revoke in --mode revise")
     parser.add_argument("--question", default="", help="Question for strictly weights-only evaluation")
     parser.add_argument("--expected", default="", help="Optional expected answer for teacher-forced score")
@@ -1736,7 +1800,9 @@ def main():
     # stand-in for grounded world cognition.
     if args.mode == "session":
         run_session(args.data_dir, enable_research=args.enable_research,
-                    research_model=args.research_model)
+                    research_model=args.research_model,
+                    enable_world_model=args.enable_world_model,
+                    world_checkpoint=args.world_checkpoint)
         return
     training, valid, originals_count, synth_count = build_examples(args.examples, args.seed, args.ideas_file, args.details_file)
     data = encode_data(training, valid)

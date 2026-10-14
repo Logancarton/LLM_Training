@@ -4,19 +4,26 @@ on:
   push:
     paths:
       - experiment_experience_learning.py
+      - experiment_world_learning.py
       - LLM_Training.py
       - sonara_memory.py
       - sonara_research.py
+      - sonara_world_model.py
+      - test_sonara_world_model.py
       - test_live_boundaries.py
       - .github/workflows/experience-learning.yml
   pull_request:
     paths:
       - experiment_experience_learning.py
+      - experiment_world_learning.py
       - EXPERIMENT_EXPERIENCE_REPORT.md
+      - EXPERIMENT_WORLD_REPORT.md
       - README.md
       - LLM_Training.py
       - sonara_memory.py
       - sonara_research.py
+      - sonara_world_model.py
+      - test_sonara_world_model.py
       - test_live_boundaries.py
       - .github/workflows/experience-learning.yml
   workflow_dispatch:
@@ -39,12 +46,13 @@ jobs:
       - name: Install CPU PyTorch
         run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Compile
-        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py test_live_boundaries.py experiment_experience_learning.py
+        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py experiment_experience_learning.py experiment_world_learning.py
       - name: Existing mechanism regression
         run: |
           python LLM_Training.py --mode self-test
           python test_sonara_memory.py
           python -m unittest -q test_live_boundaries
+          python -m unittest -v test_sonara_world_model
       - name: Live synthetic CLI session
         run: |
           printf 'Jake moved a ball into the pond.\nJake moved a ball into the shed.\n/ask Where was the ball before it was at the shed?\n/ask Where is the ball?\n/recall ball\n/train-world\n/research Why?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
@@ -59,10 +67,15 @@ jobs:
       - name: Controlled experience benchmark (3 seeds)
         run: |
           python experiment_experience_learning.py --seeds 3 --steps 60 --output artifacts/experience_learning_report.json
+      - name: Neural world model benchmark (3 seeds)
+        run: |
+          python experiment_world_learning.py --seeds 3 --steps 40 --output artifacts/world_learning_report.json
       - name: Publish experiment data
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: experience-learning-results
-          path: artifacts/experience_learning_report.json
+          path: |
+            artifacts/experience_learning_report.json
+            artifacts/world_learning_report.json
           if-no-files-found: warn
