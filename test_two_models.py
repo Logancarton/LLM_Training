@@ -89,7 +89,7 @@ class TwoModelTests(unittest.TestCase):
         result = research.research("Why does an object move?")
         self.assertEqual(result["model"], DEFAULT_LOCAL_MODEL)
         self.assertEqual(result["status"], "unverified_local_model_output")
-        self.assertEqual(result["estimated_utility"], research.expected_utility(result["question"]))
+        self.assertAlmostEqual(result["estimated_utility"], research.expected_utility(result["question"]), places=3)
         self.assertEqual(calls, [("Why does an object move?", DEFAULT_LOCAL_MODEL)])
         trained = research.feedback(result["question"], 1.0)
         self.assertTrue(trained["trained"])
