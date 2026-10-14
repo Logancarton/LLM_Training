@@ -7,8 +7,7 @@ Outputs are local; this module never reads personal sessions or modifies product
 from __future__ import annotations
 
 import argparse
-import copy
-import datetime as dt
+from collections import Counter
 import hashlib
 import json
 import random
@@ -20,7 +19,7 @@ import torch
 from torch.nn import functional as F
 
 from LLM_Training import (
-    PAD, START, UNK, IdeaReader, TinyTransformer, answer_with_weights,
+    PAD, START, UNK, IdeaReader, TinyTransformer,
     build_examples, encode_data, extend_vocabulary, load_checkpoint,
     personal_loss, personal_tokens, validation,
 )
@@ -29,7 +28,6 @@ from sonara_memory import SonaraMemorySystem
 AGENTS = ("jake", "lucy", "max", "piper")
 OBJECTS = ("ball", "stick", "toy")
 PLACES = ("yard", "pond", "shed")
-BASE_TIME = "2026-10-13"
 
 
 def scenario(actor, helper, obj, start, middle, end, corrected, scene):
@@ -122,9 +120,9 @@ def first_word(reader, writer, data, question):
     return data['words'][int(logits.argmax())], logits
 
 
-def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_override=None):
+def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_override=None, label_vocabulary=None):
     reader.eval(); writer.eval()
-    correct, total, loss_sum, groups = 0, 0, 0., {}
+    correct, total, loss_sum, groups, predictions = 0, 0, 0., {}, Counter()
     prompts = [with_experience(r, q) if context else question_only(r, q)
                for r in rows for q, _, _ in r['questions']]
     if prompts_override is not None:
@@ -136,6 +134,10 @@ def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_
             for j, (q, target, category) in enumerate(row['questions']):
                 prompt = prompts[i * len(row['questions']) + j]
                 predicted, logits = first_word(reader, writer, data, prompt)
+                if label_vocabulary is not None:
+                    candidates = [data['word_to_id'][x] for x in label_vocabulary]
+                    predicted = label_vocabulary[int(logits[candidates].argmax())]
+                predictions[predicted] += 1
                 expected = data['word_to_id'].get(target, data['word_to_id'][UNK])
                 loss_sum += float(F.cross_entropy(logits.unsqueeze(0), torch.tensor([expected])))
                 matched = predicted == target
@@ -145,6 +147,7 @@ def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_
                 groups[category] = (hit + int(matched), count + 1)
     return {"accuracy": round(correct/total, 4), "n": total,
             "target_loss": round(loss_sum/total, 4),
+            "predictions_top5": predictions.most_common(5),
             "by_category": {k: round(a/b, 4) for k, (a, b) in sorted(groups.items())}}
 
 
@@ -166,7 +169,7 @@ def measure_retrieval(rows):
                 if target in ('unknown','yes','no'):
                     continue  # An absent fact or logical relation cannot be validated by token presence.
                 # Upper bound: answer appears somewhere in retrieved evidence.
-                found = any(target in personal_tokens(s) for s in texts)
+                found = any(target in personal_tokens(s) for s in texts if s.startswith(row['id'] + ' '))
                 hit += found
                 total += 1
                 a,b = subset.get(category, (0,0))
@@ -219,8 +222,13 @@ def run_seed(seed, steps, lr, checkpoint):
     valid_sample = {k: v[:64] for k,v in data['valid'].items()}
     def general_retention():
         return round(validation(3,writer,reader,valid_sample,data['word_to_id'][PAD],torch.device('cpu'),16)[0],4)
+    train_labels = sorted({a for row in training for _, a, _ in row['questions']})
+    assert all(a in train_labels for row in held for _, a, _ in row['questions']), 'Held-out class absent in train set'
+    counts = Counter(a for row in held for _, a, _ in row['questions'])
+    majority_accuracy = round(max(counts.values()) / sum(counts.values()), 4)
     before = {
         'general_detail_loss_sample':general_retention(),
+        'heldout_forced_choice':accuracy(reader,writer,data,held,label_vocabulary=train_labels),
         'weights_only_train_episodes':accuracy(reader,writer,data,training),
         'weights_only_heldout_episodes':accuracy(reader,writer,data,held),
         'novel_with_observations':accuracy(reader,writer,data,held,context=True),
@@ -229,6 +237,7 @@ def run_seed(seed, steps, lr, checkpoint):
     gradients = train_on_synthetic(reader,writer,data,training,steps,seed,lr)
     after = {
         'general_detail_loss_sample':general_retention(),
+        'heldout_forced_choice':accuracy(reader,writer,data,held,label_vocabulary=train_labels),
         'weights_only_train_episodes':accuracy(reader,writer,data,training),
         'weights_only_heldout_episodes':accuracy(reader,writer,data,held),
         'novel_with_observations':accuracy(reader,writer,data,held,context=True),
@@ -240,7 +249,8 @@ def run_seed(seed, steps, lr, checkpoint):
     # Report question-answer separation explicitly: this harness was not called
     # through the interactive approval path and C4 is not a live integration test.
     return {"seed":seed,"train_scenarios":len(training),"heldout_scenarios":len(held),
-            "heldout_questions":len(held)*10,"vocab_extended":vocabulary_added,
+            "heldout_questions":len(held)*10,"majority_class":counts.most_common(1)[0][0],
+            "majority_accuracy":majority_accuracy,"class_distribution":dict(counts),"vocab_extended":vocabulary_added,
             "heldout_oov":missing,"original_checkpoint_sha256":hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
             "baseline":before,"memory_only":retrieval,"adaptation":gradients,
             "post_train":after,"runtime_seconds":round(time.monotonic()-start,2),
