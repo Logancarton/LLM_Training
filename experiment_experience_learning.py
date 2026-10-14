@@ -7,29 +7,28 @@ Outputs are local; this module never reads personal sessions or modifies product
 from __future__ import annotations
 
 import argparse
-import copy
-import datetime as dt
+from collections import Counter
 import hashlib
 import json
 import random
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from torch.nn import functional as F
 
 from LLM_Training import (
-    PAD, START, UNK, IdeaReader, TinyTransformer, answer_with_weights,
+    PAD, START, UNK, IdeaReader, TinyTransformer,
     build_examples, encode_data, extend_vocabulary, load_checkpoint,
-    personal_loss, personal_tokens, validation,
+    personal_loss, personal_tokens, validation, learn_approved, append_record, read_records,
 )
 from sonara_memory import SonaraMemorySystem
 
 AGENTS = ("jake", "lucy", "max", "piper")
 OBJECTS = ("ball", "stick", "toy")
 PLACES = ("yard", "pond", "shed")
-BASE_TIME = "2026-10-13"
 
 
 def scenario(actor, helper, obj, start, middle, end, corrected, scene):
@@ -122,9 +121,9 @@ def first_word(reader, writer, data, question):
     return data['words'][int(logits.argmax())], logits
 
 
-def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_override=None):
+def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_override=None, label_vocabulary=None):
     reader.eval(); writer.eval()
-    correct, total, loss_sum, groups = 0, 0, 0., {}
+    correct, total, loss_sum, groups, predictions = 0, 0, 0., {}, Counter()
     prompts = [with_experience(r, q) if context else question_only(r, q)
                for r in rows for q, _, _ in r['questions']]
     if prompts_override is not None:
@@ -136,6 +135,10 @@ def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_
             for j, (q, target, category) in enumerate(row['questions']):
                 prompt = prompts[i * len(row['questions']) + j]
                 predicted, logits = first_word(reader, writer, data, prompt)
+                if label_vocabulary is not None:
+                    candidates = [data['word_to_id'][x] for x in label_vocabulary]
+                    predicted = label_vocabulary[int(logits[candidates].argmax())]
+                predictions[predicted] += 1
                 expected = data['word_to_id'].get(target, data['word_to_id'][UNK])
                 loss_sum += float(F.cross_entropy(logits.unsqueeze(0), torch.tensor([expected])))
                 matched = predicted == target
@@ -145,6 +148,7 @@ def accuracy(reader, writer, data, rows, context=False, shuffled=False, prompts_
                 groups[category] = (hit + int(matched), count + 1)
     return {"accuracy": round(correct/total, 4), "n": total,
             "target_loss": round(loss_sum/total, 4),
+            "predictions_top5": predictions.most_common(5),
             "by_category": {k: round(a/b, 4) for k, (a, b) in sorted(groups.items())}}
 
 
@@ -166,7 +170,7 @@ def measure_retrieval(rows):
                 if target in ('unknown','yes','no'):
                     continue  # An absent fact or logical relation cannot be validated by token presence.
                 # Upper bound: answer appears somewhere in retrieved evidence.
-                found = any(target in personal_tokens(s) for s in texts)
+                found = any(target in personal_tokens(s) for s in texts if s.startswith(row['id'] + ' '))
                 hit += found
                 total += 1
                 a,b = subset.get(category, (0,0))
@@ -202,6 +206,42 @@ def train_on_synthetic(reader, writer, data, rows, steps, seed, lr):
             "reader_abs_parameter_delta":round(change,4),"steps":steps}
 
 
+
+def guarded_synthetic_learning(seed, steps, lr, checkpoint, training, held, lexicon):
+    """Exercise the real approval-gated learner with isolated synthetic oracle labels.
+
+    This deliberately does NOT represent real human approval of personal data.
+    The checkpoint and candidate logs are temporary and are never saved to Git.
+    """
+    data, word, reader, writer = load_original(checkpoint)
+    extend_vocabulary(lexicon, data, word, reader, writer)
+    args = SimpleNamespace(personal_lr=lr, personal_steps=steps, batch_size=16,
+                           replay_weight=0.5, max_retention_loss_rise=0.35)
+    sample = {k: v[:64] for k,v in data['valid'].items()}
+    def retention():
+        return round(validation(3,writer,reader,sample,data['word_to_id'][PAD],
+                                torch.device('cpu'),16)[0], 4)
+    before = retention()
+    with tempfile.TemporaryDirectory(prefix='sonara-approved-synthetic-') as work:
+        path = Path(work)
+        counter = 0
+        for row in training:
+            for q, answer, _ in row['questions']:
+                counter += 1
+                append_record(path / 'candidates.jsonl', {
+                    'id': f'synthetic_{seed}_{counter}', 'status': 'approved',
+                    'split': 'train', 'source': 'synthetic_oracle',
+                    'original_observation': ' | '.join(row['events']),
+                    'question': question_only(row,q), 'answer': answer,
+                })
+        accepted = learn_approved(path,args,data,word,reader,writer,torch.device('cpu'))
+        history = read_records(path / 'learning_metrics.jsonl')
+    return {'accepted':bool(accepted),'pre_retention_loss':before,
+            'post_retention_loss':retention(),
+            'weights_only_heldout':accuracy(reader,writer,data,held),
+            'novel_with_observations':accuracy(reader,writer,data,held,context=True),
+            'gate_metrics':history[-1] if history else None}
+
 def run_seed(seed, steps, lr, checkpoint):
     torch.manual_seed(seed)
     start = time.monotonic()
@@ -219,8 +259,13 @@ def run_seed(seed, steps, lr, checkpoint):
     valid_sample = {k: v[:64] for k,v in data['valid'].items()}
     def general_retention():
         return round(validation(3,writer,reader,valid_sample,data['word_to_id'][PAD],torch.device('cpu'),16)[0],4)
+    train_labels = sorted({a for row in training for _, a, _ in row['questions']})
+    assert all(a in train_labels for row in held for _, a, _ in row['questions']), 'Held-out class absent in train set'
+    counts = Counter(a for row in held for _, a, _ in row['questions'])
+    majority_accuracy = round(max(counts.values()) / sum(counts.values()), 4)
     before = {
         'general_detail_loss_sample':general_retention(),
+        'heldout_forced_choice':accuracy(reader,writer,data,held,label_vocabulary=train_labels),
         'weights_only_train_episodes':accuracy(reader,writer,data,training),
         'weights_only_heldout_episodes':accuracy(reader,writer,data,held),
         'novel_with_observations':accuracy(reader,writer,data,held,context=True),
@@ -229,25 +274,29 @@ def run_seed(seed, steps, lr, checkpoint):
     gradients = train_on_synthetic(reader,writer,data,training,steps,seed,lr)
     after = {
         'general_detail_loss_sample':general_retention(),
+        'heldout_forced_choice':accuracy(reader,writer,data,held,label_vocabulary=train_labels),
         'weights_only_train_episodes':accuracy(reader,writer,data,training),
         'weights_only_heldout_episodes':accuracy(reader,writer,data,held),
         'novel_with_observations':accuracy(reader,writer,data,held,context=True),
         'novel_with_shuffled_observations':accuracy(reader,writer,data,held,context=True,shuffled=True),
         'integrated_retrieval_prompt':accuracy(reader,writer,data,held,prompts_override=retrieved_prompts),
     }
+    guarded = guarded_synthetic_learning(seed,steps,lr,checkpoint,training,held,lexicon)
     # Only neural input changes here; no tool/runtime memory access allowed.
     # Existing public-data retention proxy uses an unchanged, predetermined batch.
     # Report question-answer separation explicitly: this harness was not called
     # through the interactive approval path and C4 is not a live integration test.
     return {"seed":seed,"train_scenarios":len(training),"heldout_scenarios":len(held),
-            "heldout_questions":len(held)*10,"vocab_extended":vocabulary_added,
+            "heldout_questions":len(held)*10,"majority_class":counts.most_common(1)[0][0],
+            "majority_accuracy":majority_accuracy,"class_distribution":dict(counts),"vocab_extended":vocabulary_added,
             "heldout_oov":missing,"original_checkpoint_sha256":hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
             "baseline":before,"memory_only":retrieval,"adaptation":gradients,
-            "post_train":after,"runtime_seconds":round(time.monotonic()-start,2),
+            "post_train":after,"guarded_production_learning":guarded,"runtime_seconds":round(time.monotonic()-start,2),
             "limitations":["Training Q/A targets are generated by a synthetic experimental oracle, not inferred by Sonara.",
                            "Novel-episode weights-only questions cannot reveal unseen episode-specific facts.",
                            "Memory-only scores token evidence coverage for direct entity/place answers; it does not score yes/no or unknown.",
-                           "Integrated condition feeds retrieved text into the neural reader in the experiment; live session integration is not proved."]}
+                           "Integrated condition feeds retrieved text into the neural reader in the experiment; live session integration is not proved.",
+                           "Guarded condition exercises learn_approved with simulated synthetic approval, not a real human decision."]}
 
 
 def main():
