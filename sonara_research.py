@@ -43,7 +43,7 @@ class ResearchModel(nn.Module):
 
 def ollama_local_generate(question: str, model: str) -> str:
     """Send only to the fixed local-loopback Ollama endpoint, with no proxy."""
-    if not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,100}", model):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?(?::[A-Za-z0-9_.-]+)?", model):
         raise ValueError("Invalid local Ollama model name")
     payload = {
         "model": model,
