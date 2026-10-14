@@ -59,7 +59,12 @@ Jake moved the ball into the pond.
 /research Why do objects float?
 ```
 
-The first state answer is attributed to evidence. `/train-world` needs at
+The first state answer is attributed to evidence. Explicit time-qualified
+questions currently abstain rather than pretending historical reasoning.
+The human-readable memory journal is exported on demand (for example,
+`python LLM_Training.py --mode memories`) rather than regenerated after
+every stored observation. Raw JSONL memory is still loaded into RAM, so
+large-scale persistence/indexing remains future work. `/train-world` needs at
 least **four explicit location observations and four unrelated observations**;
 it will not invent training targets from unconfirmed external AI answers.
 `/research` remains disabled until the operator opts in:
@@ -119,7 +124,7 @@ Human-like episodic and semantic memory system decoupled from static neural weig
 * **Semantic Frame Mapping**: Automatically parses observations into `WHO / ACTION / WHAT` frames matching the `IdeaReader`.
 * **Entity Inverted Index**: Dynamic graph of known people, places, and objects.
 * **Consolidation / Reflection Engine**: Consolidates clusters of episodic experiences into high-level synthesized reflections (similar to sleep/dream consolidation).
-* **Dual Persistence**: Machine-auditable append-only JSONL log (`memories.jsonl`) + Human-readable Markdown Journal (`sonara_memory_journal.md`).
+* **Raw persistence + optional export**: Machine-auditable append-only JSONL log (`memories.jsonl`); the human-readable Markdown Journal (`sonara_memory_journal.md`) is generated on demand to avoid rewriting it for every new memory.
 
 ### 3. Epistemic Rigor & Built-In Causal Checks
 * **Causal Idea Check**: Evaluates generation loss with wrong/shuffled idea vectors against the correct idea vector to verify whether the generator actually conditions on semantic intent.
