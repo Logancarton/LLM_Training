@@ -66,12 +66,11 @@ def test_memory_system():
     assert len(pref_results) > 0
     print(f"  Preference Query Top Match: \"{pref_results[0][0].content}\"")
 
-    print("\n=== TEST 4: Memory Reflection / Consolidation ===")
-    reflections = mem_sys.reflect()
-    print(f"  Generated {len(reflections)} reflection(s):")
-    for r in reflections:
-        print(f"  • [{r.timestamp_human}] {r.content}")
-    assert len(reflections) >= 1
+    print("\n=== TEST 4: No fabricated cognition ===")
+    assert m1.semantic_frame == {}
+    assert m2.semantic_frame == {}
+    assert not any(m.category == "reflection" for m in mem_sys.memories.values())
+    print("✓ No guessed semantic frames or automatic reflections")
 
     print("\n=== TEST 5: Timeline & Journal Generation ===")
     timeline = mem_sys.get_timeline(limit=10)
