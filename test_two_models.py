@@ -36,6 +36,14 @@ class TwoModelTests(unittest.TestCase):
         restarted = WorldCognition(reloaded, self.root)
         self.assertIn("shed", restarted.answer_where("Where is the ball?"))
         self.assertEqual(len(reloaded.memories), 3)
+        self.assertIn(second.id, reloaded.entity_index["ball"])
+        self.assertIn("time-qualified", restarted.answer_where("Where was the ball at 12:15?"))
+
+    def test_time_order_across_timezone_offsets(self):
+        # 19:15 UTC is later than 12:00 -07:00, regardless of string order.
+        self.world.observe("2026-10-13T12:00:00-07:00 The ball is in the yard.", "s")
+        self.world.observe("2026-10-13T19:15:00+00:00 The ball is in the pond.", "s")
+        self.assertIn("pond", self.world.answer_where("Where is the ball?"))
 
     def test_event_time_separate_from_recorded_time(self):
         frame = parse_state("2026-10-13T12:15:00-07:00 Jake moved the ball to yard.",
