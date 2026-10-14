@@ -4,6 +4,85 @@ A modular, experimental PyTorch architecture exploring language generation, psyc
 
 ---
 
+## Two-model Sonara architecture (experimental)
+
+The live session now uses **two independently trainable neural roles** beside the existing
+language reader/writer. These are research mechanisms, **not** proof of autonomous
+understanding or broad factual intelligence:
+
+1. **World cognition** (sonara_world.py) reads user observations into the **existing**
+   episodic memory store, preserving event-time and observation provenance. Explicitly
+   stated locations can be answered from evidence; unknown locations are acknowledged.
+   A small neural model separately estimates whether text signals a location/state change.
+   The user must explicitly request bounded training. It uses weak pattern-supervised
+   examples and a held-out-loss gate; it does **not** yet learn causal state dynamics.
+2. **Research cognition** (sonara_research.py) uses a small neural utility predictor
+   to choose among configured ChatGPT/OpenAI, Claude/Anthropic, or Gemini API calls.
+   Only explicit `/research` prompts may leave the machine, and only with
+   `--enable-research`. Users can score usefulness with `/rate-research`; only
+   the **provider-selection policy** learns from that rating. External responses
+   remain **unverified evidence** and never automatically enter episodic memory,
+   world-model weights, or the older approved Q/A training pipeline.
+
+The earlier Stage 1/2/3 language models are preserved for language generation
+and the existing research benchmarks, not treated as the world-model owner.
+Old `--mode learn` still performs legacy approved-Q/A language fine-tuning.
+The world and research models do **not** share a duplicate memory database.
+
+```text
+User experience ─> SonaraMemorySystem (canonical evidence + event times)
+                       │
+                       └──> WorldCognition ──> evidence-grounded state answer
+                                  │                  │
+                                  └──> neural change predictor (explicit training)
+
+Explicit /research ─> ResearchCognition ─> permitted external AI API
+                            │                     │
+                   neural provider policy <── rated utility (/rate-research)
+                                                  │
+                                         unverified external evidence
+                                        (never auto-promoted to world facts)
+```
+
+**Try the real session:**
+
+```bash
+python LLM_Training.py --mode session
+```
+
+Within the session:
+
+```text
+Jake moved the ball into the pond.
+/ask Where is the ball?
+/train-world
+/research Why do objects float?
+```
+
+The first state answer is attributed to evidence. `/train-world` needs at
+least **four explicit location observations and four unrelated observations**;
+it will not invent training targets from unconfirmed external AI answers.
+`/research` remains disabled until the operator opts in:
+
+```bash
+export OPENAI_API_KEY="..."       # Or ANTHROPIC_API_KEY / GEMINI_API_KEY
+python LLM_Training.py --mode session --enable-research
+```
+
+On Windows PowerShell, use `$env:OPENAI_API_KEY = "..."` instead of export.
+Research prompts are sent to the selected third-party provider and may incur
+API charges. In a session, `/rate-research 0.8` teaches the routing model
+using explicit usefulness feedback. Provider replies should be independently
+checked. `--research-provider openai` pins a provider.
+
+**Development gate:** `python -m unittest -q test_two_models`; the
+GitHub Actions benchmark also exercises the actual session path.
+**Not yet demonstrated:** generalized causal prediction, calibrated world
+uncertainty, continual self-supervised learning, or research-policy transfer
+to unseen questions.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -53,6 +132,9 @@ Human-like episodic and semantic memory system decoupled from static neural weig
 
 ```
 ├── LLM_Training.py               # Core 3-stage neural pipeline, CLI, and interactive session
+├── sonara_world.py               # Evidence-grounded world owner and bounded neural transition estimation
+├── sonara_research.py            # Opt-in external AI research and trainable provider selection
+├── test_two_models.py            # Live-owner learning/isolation verification
 ├── sonara_memory.py              # Cognitive memory system with timestamps & reflection
 ├── test_sonara_memory.py         # Automated verification suite for the memory system
 ├── test_five_minute_experience.py # 5-minute sequential experience simulation & recall
