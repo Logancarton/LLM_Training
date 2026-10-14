@@ -4,87 +4,92 @@ A modular, experimental PyTorch architecture exploring language generation, psyc
 
 ---
 
-## Two-model Sonara architecture (experimental)
+## Two-model Sonara architecture (experimental; fully local)
 
-The live session now uses **two independently trainable neural roles** beside the existing
-language reader/writer. These are research mechanisms, **not** proof of autonomous
-understanding or broad factual intelligence:
+**No paid AI API, subscription, or API key is needed.** The live Sonara session
+uses two separate cognitive roles:
 
-1. **World cognition** (sonara_world.py) reads user observations into the **existing**
-   episodic memory store, preserving event-time and observation provenance. Explicitly
-   stated locations can be answered from evidence; unknown locations are acknowledged.
-   A small neural model separately estimates whether text signals a location/state change.
-   The user must explicitly request bounded training. It uses weak pattern-supervised
-   examples and a held-out-loss gate; it does **not** yet learn causal state dynamics.
-2. **Research cognition** (sonara_research.py) uses a small neural utility predictor
-   to choose among configured ChatGPT/OpenAI, Claude/Anthropic, or Gemini API calls.
-   Only explicit `/research` prompts may leave the machine, and only with
-   `--enable-research`. Users can score usefulness with `/rate-research`; only
-   the **provider-selection policy** learns from that rating. External responses
-   remain **unverified evidence** and never automatically enter episodic memory,
-   world-model weights, or the older approved Q/A training pipeline.
+1. **World cognition** (`sonara_world.py`) keeps grounded observations, entity
+   state, timestamps, and corrections in Sonara's original **single** memory
+   store. A tiny neural change classifier can be trained on bounded, weakly
+   labeled samples with a holdout acceptance check. It does **not** yet learn
+   general causal laws.
+2. **Local research cognition** (`sonara_research.py`) calls a small, quantized
+   language model served by **Ollama on 127.0.0.1**. It suggests explanations
+   and hypotheses only on explicit `/research` requests. A separate tiny
+   neural utility head learns from `/rate-research` scores to estimate how
+   useful research questions might be. This does **not** fine-tune the local
+   language model or automatically update Sonara's world beliefs.
 
-The earlier Stage 1/2/3 language models are preserved for language generation
-and the existing research benchmarks, not treated as the world-model owner.
-Old `--mode learn` still performs legacy approved-Q/A language fine-tuning.
-The world and research models do **not** share a duplicate memory database.
+The existing three-stage language reader and writer are retained for backward
+compatibility and language experiments. The old approved-Q/A neural learning
+path remains distinct from the new bounded World Model. No parallel episodic
+memory or automatic training on all stored text has been introduced.
 
 ```text
-User experience ─> SonaraMemorySystem (canonical evidence + event times)
-                       │
-                       └──> WorldCognition ──> evidence-grounded state answer
-                                  │                  │
-                                  └──> neural change predictor (explicit training)
+                            Incoming experience
+                                    |
+                    SonaraMemorySystem (one evidence store)
+                                    |
+                           WorldCognition
+                          (neural + evidence)
 
-Explicit /research ─> ResearchCognition ─> permitted external AI API
-                            │                     │
-                   neural provider policy <── rated utility (/rate-research)
-                                                  │
-                                         unverified external evidence
-                                        (never auto-promoted to world facts)
+User /research request --> ResearchCognition --> Ollama localhost
+                                 |                    |
+                     Tiny utility learner     Small frozen local LLM
+                    (explicit rated feedback)        |
+                                                Unverified hypotheses
+                                      (not automatically world knowledge)
 ```
 
-**Try the real session:**
+### Laptop setup
 
-```bash
-python LLM_Training.py --mode session
+Install [Ollama](https://ollama.com/download) for Mac or Windows. Download the
+small research model **once** while online:
+
+```powershell
+ollama pull qwen2.5:1.5b-instruct
+ollama list
 ```
 
-Within the session:
+Qwen2.5 1.5B Instruct uses a roughly **986 MB quantized model download**,
+though running it requires additional RAM. It can operate without internet
+after initial installation and download. Start Ollama if it is not already
+running (`ollama serve`), then start Sonara:
+
+```powershell
+python LLM_Training.py --mode session --enable-research
+```
+
+In Sonara's interactive session:
 
 ```text
 Jake moved the ball into the pond.
 /ask Where is the ball?
-/train-world
-/research Why do objects float?
+/research Why do some objects float?
+/rate-research 0.8
 ```
 
-The first state answer is attributed to evidence. Explicit time-qualified
-questions currently abstain rather than pretending historical reasoning.
-The human-readable memory journal is exported on demand (for example,
-`python LLM_Training.py --mode memories`) rather than regenerated after
-every stored observation. Raw JSONL memory is still loaded into RAM, so
-large-scale persistence/indexing remains future work. `/train-world` needs at
-least **four explicit location observations and four unrelated observations**;
-it will not invent training targets from unconfirmed external AI answers.
-`/research` remains disabled until the operator opts in:
+Optionally select another **installed** local model with
+`--research-model qwen2.5:3b`, which needs more resources.
 
-```bash
-export OPENAI_API_KEY="..."       # Or ANTHROPIC_API_KEY / GEMINI_API_KEY
-python LLM_Training.py --mode session --enable-research
-```
+The research model makes **no outgoing cloud calls** and never silently
+retrieves web pages. This means it cannot independently verify current facts
+or read scientific papers without a future separately controlled local document
+ingestion mechanism. Local responses are hypotheses, not authenticated evidence.
 
-On Windows PowerShell, use `$env:OPENAI_API_KEY = "..."` instead of export.
-Research prompts are sent to the selected third-party provider and may incur
-API charges. In a session, `/rate-research 0.8` teaches the routing model
-using explicit usefulness feedback. Provider replies should be independently
-checked. `--research-provider openai` pins a provider.
+The World Model's `/train-world` command remains bounded and explicit.
+Presently it needs at least four explicit location observations and four
+unrelated observations. Unfamiliar time-qualified questions abstain.
+The memory log stays append-only and reloads into RAM; large-scale persistent
+indexing is **not** implemented yet. Export the human-readable journal on demand
+using `python LLM_Training.py --mode memories`.
 
-**Development gate:** `python -m unittest -q test_two_models`; the
-GitHub Actions benchmark also exercises the actual session path.
-**Not yet demonstrated:** generalized causal prediction, calibrated world
-uncertainty, continual self-supervised learning, or research-policy transfer
-to unseen questions.
+**Development:** Run `python -m unittest -q test_two_models`. Tests mock the
+Ollama connection: passing CI proves routing, storage boundaries, and feedback
+behavior—not actual local inference, physical laptop performance, generalized
+world understanding, or independent autonomous learning. Existing legacy
+approved-Q/A learning is not removed in this change.
 
 ---
 
