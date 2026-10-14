@@ -116,7 +116,7 @@ class WorldCognition:
 
     def learn_bounded(self, max_examples: int = 64, steps: int = 40, seed: int = 19) -> dict:
         """Weak supervision: fit from a bounded selection of observed location assertions.
-        
+
         This is intentionally NOT automatic ingestion or generic causal learning.
         Acceptance uses a held-out sample; original evidence is never overwritten.
         """
