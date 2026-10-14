@@ -100,7 +100,7 @@ class WorldCognition:
         if not match:
             return None
         entity = match["entity"].lower()
-        if re.search(r"\\b(?:at|on)\\s+\\d", question, re.I):
+        if re.search(r"\b(?:at|on)\s+\d", question, re.I):
             return "Unknown: time-qualified world queries need an explicit event-time reasoning test."
         observations = []
         for memory_id in self.memories.entity_index.get(entity, ()):
