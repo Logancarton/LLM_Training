@@ -65,7 +65,9 @@ In Sonara's interactive session:
 
 ```text
 Jake moved the ball into the pond.
+Jake moved the ball into the shed.
 /ask Where is the ball?
+/ask Where was the ball before it was at the shed?
 /research Why do some objects float?
 /rate-research 0.8
 ```
@@ -80,7 +82,20 @@ ingestion mechanism. Local responses are hypotheses, not authenticated evidence.
 
 The World Model's `/train-world` command remains bounded and explicit.
 Presently it needs at least four explicit location observations and four
-unrelated observations. Unfamiliar time-qualified questions abstain.
+unrelated observations.
+
+World-state history questions like "Where was the ball before it was at the
+shed?" now find the earlier **reported** location using the same timestamped
+memory evidence, even after restart. The World owner identifies a supported
+before-condition, finds the referenced shed observation, and returns the
+most recent different observed location before it. An absent or repeated
+anchor, contradictory entity reference, or unsupported relative/time-qualified
+wording returns `Unknown` instead of silently returning the latest location.
+A reported location does not prove a continuously observed trajectory.
+
+**This is bounded, explicit temporal query logic, not newly learned
+temporal cognition.** The World Model neural weights are unchanged by
+these questions. Truly generalized event reasoning is still unproven.
 The memory log stays append-only and reloads into RAM; large-scale persistent
 indexing is **not** implemented yet. Export the human-readable journal on demand
 using `python LLM_Training.py --mode memories`.

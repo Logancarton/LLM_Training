@@ -49,8 +49,9 @@ jobs:
           python -m unittest -q test_two_models
       - name: Live synthetic CLI session
         run: |
-          printf 'Jake moved a ball into the pond.\n/ask Where is the ball?\n/ask Who is Jake?\n/research Why?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
-          grep -q 'Observed report: ball was at pond' "$RUNNER_TEMP/session_output.txt"
+          printf 'Jake moved a ball into the pond.\nJake moved a ball into the shed.\n/ask Where was the ball before it was at the shed?\n/ask Where is the ball?\n/ask Who is Jake?\n/research Why?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
+          grep -q 'Previously reported location: ball was at pond' "$RUNNER_TEMP/session_output.txt"
+          grep -q 'Observed report: ball was at shed' "$RUNNER_TEMP/session_output.txt"
           grep -q 'UNVERIFIED NEURAL PREDICTION' "$RUNNER_TEMP/session_output.txt"
           grep -q 'Local research is disabled' "$RUNNER_TEMP/session_output.txt"
       - name: Scoped diff whitespace check
