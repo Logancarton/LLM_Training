@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - experiment_experience_learning.py
+      - EXPERIMENT_EXPERIENCE_REPORT.md
       - README.md
       - LLM_Training.py
       - sonara_memory.py
