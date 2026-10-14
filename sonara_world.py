@@ -96,6 +96,8 @@ class WorldCognition:
         if not match:
             return None
         entity = match["entity"].lower()
+        if re.search(r"\\b(?:at|on)\\s+\\d", question, re.I):
+            return "Unknown: time-qualified world queries need an explicit event-time reasoning test."
         observations = []
         for memory_id in self.memories.entity_index.get(entity, ()):
             memory = self.memories.memories[memory_id]
@@ -106,7 +108,10 @@ class WorldCognition:
                 observations.append((state.get("observed_at", memory.timestamp_iso), memory, state))
         if not observations:
             return f"Unknown: no explicit location observation for {entity}."
-        observations.sort(key=lambda row: (row[0], row[1].timestamp_iso, row[1].id))
+        # Compare instants, not ISO strings with different timezone offsets.
+        observations.sort(key=lambda row: (datetime.fromisoformat(row[0]),
+                                           datetime.fromisoformat(row[1].timestamp_iso),
+                                           row[1].id))
         _, evidence, state = observations[-1]
         probability = self.change_probability(evidence.content)
         suffix = (f" World-model state-change estimate: {probability:.2f} (experimental, not verification)."
