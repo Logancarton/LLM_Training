@@ -6,9 +6,8 @@ on:
       - experiment_experience_learning.py
       - LLM_Training.py
       - sonara_memory.py
-      - sonara_world.py
       - sonara_research.py
-      - test_two_models.py
+      - test_live_boundaries.py
       - .github/workflows/experience-learning.yml
   pull_request:
     paths:
@@ -17,9 +16,8 @@ on:
       - README.md
       - LLM_Training.py
       - sonara_memory.py
-      - sonara_world.py
       - sonara_research.py
-      - test_two_models.py
+      - test_live_boundaries.py
       - .github/workflows/experience-learning.yml
   workflow_dispatch:
 
@@ -41,19 +39,21 @@ jobs:
       - name: Install CPU PyTorch
         run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Compile
-        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_world.py sonara_research.py test_two_models.py experiment_experience_learning.py
+        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py test_live_boundaries.py experiment_experience_learning.py
       - name: Existing mechanism regression
         run: |
           python LLM_Training.py --mode self-test
           python test_sonara_memory.py
-          python -m unittest -q test_two_models
+          python -m unittest -q test_live_boundaries
       - name: Live synthetic CLI session
         run: |
-          printf 'Jake moved a ball into the pond.\nJake moved a ball into the shed.\n/ask Where was the ball before it was at the shed?\n/ask Where is the ball?\n/ask Who is Jake?\n/research Why?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
-          grep -q 'Previously reported location: ball was at pond' "$RUNNER_TEMP/session_output.txt"
-          grep -q 'Observed report: ball was at shed' "$RUNNER_TEMP/session_output.txt"
-          grep -q 'UNVERIFIED NEURAL PREDICTION' "$RUNNER_TEMP/session_output.txt"
+          printf 'Jake moved a ball into the pond.\nJake moved a ball into the shed.\n/ask Where was the ball before it was at the shed?\n/ask Where is the ball?\n/recall ball\n/train-world\n/research Why?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
+          grep -q 'UNKNOWN: No trained world-question answering mechanism' "$RUNNER_TEMP/session_output.txt"
+          grep -q 'Retired: rule-labeled classifier' "$RUNNER_TEMP/session_output.txt"
           grep -q 'Local research is disabled' "$RUNNER_TEMP/session_output.txt"
+          grep -q 'Found .* relevant memory' "$RUNNER_TEMP/session_output.txt"
+          ! grep -q 'Observed report: ball was' "$RUNNER_TEMP/session_output.txt"
+          ! grep -q 'Previously reported location: ball' "$RUNNER_TEMP/session_output.txt"
       - name: Scoped diff whitespace check
         run: git diff --check origin/main...HEAD
       - name: Controlled experience benchmark (3 seeds)
