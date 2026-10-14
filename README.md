@@ -139,3 +139,21 @@ python3 LLM_Training.py --examples 8000 --epochs 2 --idea-epochs 8 --width 64 --
 
 ## License
 MIT License. Created by Logan Carton.
+
+
+## Controlled experience-learning research (synthetic only)
+
+Run \`python experiment_experience_learning.py --seeds 1 --steps 60\` to compare
+the existing trained reader/writer before and after synthetic Q/A supervision.
+The reproducible harness holds out entire actor–object combinations and reports:
+weights-only accuracy, memory retrieval **evidence coverage**, neural prediction
+with current observations, and neural prediction with retrieved observations.
+It also reports uncertainty questions, correction cases, a shuffled-context
+ablation, parameter change, and sampled general-task retention.
+
+Interpretation limits: retrieval evidence coverage is NOT answer accuracy;
+synthetic oracle Q/A targets are supervised data, NOT autonomous learning;
+the context-fed neural evaluation is not the same as the production live session.
+A reduction in training loss without held-out gains is a negative result.
+No personal session data or modified model checkpoints should be committed.
+The GitHub Actions job uploads a JSON artifact for scientific review.
