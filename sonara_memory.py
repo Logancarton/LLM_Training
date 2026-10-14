@@ -216,7 +216,13 @@ class SonaraMemorySystem:
 
     def _index_memory(self, mem: Memory):
         """Index memory by its entities for fast associative lookup."""
-        for ent in mem.entities:
+        # Reuse one index for both legacy extracted names and explicitly
+        # asserted world-state entities; no shadow state database.
+        indexed = set(mem.entities)
+        world_entity = mem.semantic_frame.get("entity")
+        if world_entity:
+            indexed.add(world_entity)
+        for ent in indexed:
             key = ent.lower()
             if key not in self.entity_index:
                 self.entity_index[key] = []
