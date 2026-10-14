@@ -50,6 +50,11 @@ class TwoModelTests(unittest.TestCase):
                             "2026-10-13T23:00:00+00:00")
         self.assertEqual(frame["observed_at"], "2026-10-13T12:15:00-07:00")
         self.assertIsNone(parse_state("A ball might be in some place.", "2026-10-13T23:00:00+00:00"))
+        moved = parse_state("Jake moved the ball from the yard to the pond.",
+                            "2026-10-13T23:00:00+00:00")
+        self.assertEqual(moved["location"], "pond")
+        self.assertIsNone(parse_state("Jake took the ball from the yard.",
+                                      "2026-10-13T23:00:00+00:00"))
 
     def test_neural_learning_is_explicit_bounded_and_guarded(self):
         torch.manual_seed(8)
