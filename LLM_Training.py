@@ -1390,11 +1390,17 @@ def learn_approved(data_dir, args, data, word_model, reader, writer, device):
 # =====================================================================
 
 
-def run_session(data_dir, reader, writer, data, device, has_checkpoint):
+def run_session(data_dir, reader, writer, data, device, has_checkpoint, enable_research=False, research_provider=None):
     session_id = uuid.uuid4().hex[:12]
     from sonara_memory import SonaraMemorySystem
+    from sonara_world import WorldCognition
+    from sonara_research import ResearchCognition
     mem_sys = SonaraMemorySystem(Path(data_dir) / "sonara_memories")
+    world = WorldCognition(mem_sys, data_dir)
+    research = ResearchCognition(data_dir) if enable_research else None
+    last_research = None
     print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline | /reflect | /feedback")
+    print("World: /train-world (bounded weak-supervision experiment). Research: /research <question> and /rate-research <0..1> (requires --enable-research).")
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "start", "timestamp": now_iso(), "local_user": "owner"})
     event_index = 0
     last_prediction = None
@@ -1407,6 +1413,43 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint):
             break
         if not line:
             continue
+        if line == "/train-world":
+            metrics = world.learn_bounded()
+            print("Sonara> World training:", json.dumps(metrics, sort_keys=True))
+            continue
+        if line.startswith("/research "):
+            if research is None:
+                print("Sonara> External research is disabled. Restart with --enable-research to opt in.")
+                continue
+            question = line[len("/research "):].strip()
+            try:
+                result = research.research(question, research_provider)
+            except (ValueError, OSError, KeyError, IndexError) as error:
+                print("Sonara> Research unavailable:", type(error).__name__, str(error)[:200])
+                continue
+            last_research = result
+            append_record(Path(data_dir) / "research_events.jsonl",
+                          {"timestamp": now_iso(), "session_id": session_id,
+                           "source": "external_ai", **result})
+            print(f"Sonara> UNVERIFIED EXTERNAL AI ({result['provider']}): {result['answer']}")
+            continue
+        if line.startswith("/rate-research "):
+            if research is None or last_research is None:
+                print("Sonara> No research result to evaluate.")
+                continue
+            try:
+                utility = float(line[len("/rate-research "):].strip())
+                metrics = research.feedback(last_research["question"], last_research["provider"], utility)
+            except ValueError as error:
+                print("Sonara> Invalid usefulness score:", error)
+                continue
+            append_record(Path(data_dir) / "research_feedback.jsonl",
+                          {"timestamp": now_iso(), "session_id": session_id,
+                           "provider": last_research["provider"], "question": last_research["question"],
+                           "utility": utility, "training": metrics})
+            last_research = None
+            print("Sonara> Research routing feedback:", json.dumps(metrics, sort_keys=True))
+            continue
         if line.startswith("/feedback "):
             correction = line[len("/feedback "):].strip()
             if last_prediction is None or not correction:
@@ -1417,11 +1460,12 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint):
                 "session_id": session_id, "prediction_id": last_prediction["id"],
                 "user_feedback": correction, "status": "unverified-user-feedback",
             })
-            print("Feedback saved as an observation, not automatically trained")
+            world.observe(correction, session_id)
+            print("Feedback saved as an attributed observation, not automatically trained")
             continue
         if line.startswith("/remember "):
             text = line[len("/remember "):].strip()
-            mem = mem_sys.remember(text, category="episodic", importance=8.5, session_id=session_id)
+            mem = world.observe(text, session_id)
             print(f"Sonara> Memory saved: [{mem.timestamp_human}] ({mem.relative_time()})")
             print(f"        ID: {mem.id} | Entities: {mem.entities}")
             continue
@@ -1462,22 +1506,26 @@ def run_session(data_dir, reader, writer, data, device, has_checkpoint):
                   "timestamp": now_iso(), "event_index": event_index, "text": line, "type": "question" if ask else "observation"}
         append_record(Path(data_dir) / "events.jsonl", record)
         if not ask:
-            mem = mem_sys.remember(line, category="episodic", session_id=session_id)
+            mem = world.observe(line, session_id)
             create_candidate(data_dir, record)
             response = f"Memory saved at {mem.timestamp_human} ({mem.relative_time()}). Observation queued for learning review."
         else:
-            recalled = mem_sys.recall(line, limit=2)
-            mem_note = ""
-            if recalled and recalled[0][1] >= 0.35:
-                top_m, top_s = recalled[0]
-                mem_note = f"\n  [Sonara recalled from memory ({top_m.relative_time()}): \"{top_m.content}\"]"
-
-            if has_checkpoint:
-                reply = answer_with_weights(reader, writer, line, data, device)
-                response = "UNVERIFIED NEURAL PREDICTION: " + reply + mem_note
+            # World-state queries take evidence from the canonical memory log.
+            # The neural state estimator is experimental and never overrides evidence.
+            world_answer = world.answer_where(line)
+            if world_answer is not None:
+                response = world_answer
             else:
+                recalled = mem_sys.recall(line, limit=2)
+                mem_note = ""
                 if recalled and recalled[0][1] >= 0.35:
-                    response = f"From memory ({recalled[0][0].relative_time()}): \"{recalled[0][0].content}\""
+                    top_m, top_s = recalled[0]
+                    mem_note = f'\n  [Sonara recalled from memory ({top_m.relative_time()}): "{top_m.content}"]'
+                if has_checkpoint:
+                    reply = answer_with_weights(reader, writer, line, data, device)
+                    response = "UNVERIFIED NEURAL PREDICTION: " + reply + mem_note
+                elif recalled and recalled[0][1] >= 0.35:
+                    response = f'From memory ({recalled[0][0].relative_time()}): "{recalled[0][0].content}"'
                 else:
                     response = "No trained checkpoint or memory found; the answer is unknown."
 
@@ -1662,6 +1710,9 @@ def main():
     parser.add_argument("--novel-detail", default="the dog walks slowly behind the ball .")
     parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "thoughts", "self-test", "memories"), default="train")
     parser.add_argument("--data-dir", default="learning_data", help="Local private session and approval files")
+    parser.add_argument("--enable-research", action="store_true", help="Explicitly permit /research to send questions to configured external AI APIs")
+    parser.add_argument("--research-provider", choices=("openai", "anthropic", "gemini"), default=None,
+                        help="Optionally pin one configured research provider rather than learned routing")
     parser.add_argument("--candidate-id", default="", help="ID to correct or revoke in --mode revise")
     parser.add_argument("--question", default="", help="Question for strictly weights-only evaluation")
     parser.add_argument("--expected", default="", help="Optional expected answer for teacher-forced score")
@@ -1745,7 +1796,8 @@ def main():
         load_checkpoint(args.checkpoint, data, args, word_model, reader, writer, device)
 
     if args.mode == "session":
-        run_session(args.data_dir, reader, writer, data, device, has_checkpoint)
+        run_session(args.data_dir, reader, writer, data, device, has_checkpoint,
+                    enable_research=args.enable_research, research_provider=args.research_provider)
         return
     if args.mode == "evaluate":
         if not args.weights_only:
