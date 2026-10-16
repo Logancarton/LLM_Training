@@ -1780,7 +1780,7 @@ def main():
     parser.add_argument("--adapt-steps", type=int, default=18)
     parser.add_argument("--novel-idea", default="the dog follows the ball")
     parser.add_argument("--novel-detail", default="the dog walks slowly behind the ball .")
-    parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "self-test", "memories"), default="train")
+    parser.add_argument("--mode", choices=("train", "session", "review", "revise", "learn", "evaluate", "timeline", "self-test", "memories", "experience"), default="train")
     parser.add_argument("--data-dir", default="learning_data", help="Local private session and approval files")
     parser.add_argument("--enable-research", action="store_true",
                         help="Enable explicit /research requests to a laptop-local Ollama model")
@@ -1792,6 +1792,14 @@ def main():
                         help="Path to neural World Model checkpoint")
     parser.add_argument("--enable-adaptive-loop", action="store_true",
                         help="Use cue-scoped explicit feedback to calibrate neural answer caution and bounded recall")
+    parser.add_argument("--experience-seeds", type=int, default=3,
+                        help="Causal-loop experiment: counterbalanced simulated worlds")
+    parser.add_argument("--experience-dim", type=int, default=24,
+                        help="Causal-loop experiment: compact world-model width")
+    parser.add_argument("--experience-heldout", type=int, default=3,
+                        help="Causal-loop experiment: novel actor/object pairs")
+    parser.add_argument("--experience-output", default="artifacts/causal_learning_report.json",
+                        help="Causal-loop experiment JSON report path")
     parser.add_argument("--candidate-id", default="", help="ID to correct or revoke in --mode revise")
     parser.add_argument("--question", default="", help="Question for strictly weights-only evaluation")
     parser.add_argument("--expected", default="", help="Optional expected answer for teacher-forced score")
@@ -1821,6 +1829,16 @@ def main():
     # Local record management does not load the neural model or regenerate data.
     if args.mode == "self-test":
         self_test()
+        return
+    if args.mode == "experience":
+        # Deliberately runs before the language-checkpoint/data pipeline.
+        # One existing neural world owner, one existing evidence-memory owner.
+        from experiment_causal_loop import run_experiment
+        report = run_experiment(
+            seeds=args.experience_seeds, dim=args.experience_dim,
+            heldout_count=args.experience_heldout, data_dir=args.data_dir,
+            output=args.experience_output)
+        print(json.dumps(report["summary"], indent=2))
         return
     if args.mode == "review":
         show_review(args.data_dir, interactive=not args.noninteractive)
