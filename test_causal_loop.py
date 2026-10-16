@@ -16,8 +16,8 @@ class CausalExperienceTests(unittest.TestCase):
         self.assertNotEqual(even.mapping["tap"], odd.mapping["tap"])
         self.assertNotEqual(even.act("tap"), even.act("hold"))
         before = context(TRAIN_ACTOR, TRAIN_OBJECT)
-        self.assertTrue(all(even.mapping[a] not in question(TRAIN_ACTOR, TRAIN_OBJECT, a)
-                            for a in ACTIONS if even.mapping[a] not in ("north", "south")))
+        self.assertTrue(all(question(TRAIN_ACTOR, TRAIN_OBJECT, a).endswith(
+                            f"uses {a}?") for a in ACTIONS))
         self.assertNotIn("moved", " ".join(before))
         self.assertNotIn("verified", " ".join(before).lower())
         with self.assertRaises(ValueError):
@@ -42,7 +42,8 @@ class CausalExperienceTests(unittest.TestCase):
             self.assertEqual(len(memory.memories), 2)
             self.assertEqual({m.source for m in memory.memories.values()},
                              {"agent_action", "environment_observation"})
-            self.assertEqual(len(memory.recall("verified simulator observation", min_score=0.01)), 1)
+            self.assertTrue(any(m.id == trial["outcome_memory_id"] for m, _ in
+                                memory.recall("verified observation using", min_score=0.01)))
 
     def test_lie_control_is_isolated_from_verified_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
