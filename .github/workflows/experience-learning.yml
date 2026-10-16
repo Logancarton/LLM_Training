@@ -22,6 +22,7 @@ on:
       - experiment_world_learning.py
       - EXPERIMENT_EXPERIENCE_REPORT.md
       - EXPERIMENT_WORLD_REPORT.md
+      - EXPERIMENT_CAUSAL_LOOP_REPORT.md
       - README.md
       - LLM_Training.py
       - sonara_memory.py
