@@ -197,6 +197,8 @@ Tests: `python3 -m unittest -v test_sonara_adaptive test_live_boundaries`.
 
 ## Experience-to-causal-learning experiment (opt-in; synthetic only)
 
+Measured results and limitations: [EXPERIMENT_CAUSAL_LOOP_REPORT.md](EXPERIMENT_CAUSAL_LOOP_REPORT.md).
+
 The `experience` mode tests a full **prediction → chosen action → verified
 environmental consequence → one neural gradient update → later prediction
 and decision** cycle. It uses the existing `SonaraWorldModel.learn_step`
