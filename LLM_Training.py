@@ -1409,7 +1409,7 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             world_model = None
     pending_expectation = None
     last_research = None
-    adaptive = AdaptiveLoop(read_records(Path(data_dir) / "events.jsonl")) if enable_adaptive_loop else None
+    adaptive = AdaptiveLoop(read_records(Path(data_dir) / "events.jsonl") if enable_adaptive_loop else ())
     last_neural = None
 
     print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline")
@@ -1418,7 +1418,7 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
     else:
         print("World reasoning: NOT IMPLEMENTED. No programmed location/temporal answers or auto-trained world classifier.")
     print("Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
-    if adaptive is not None:
+    if enable_adaptive_loop:
         print("Adaptive gate: ON. /rate-answer <0..1> rates the immediately preceding neural prediction.")
         print("The gate learns caution, not facts or neural world-model weights.")
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "start", "timestamp": now_iso(), "local_user": "owner"})
@@ -1490,7 +1490,7 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             print("Sonara> Local research utility feedback:", json.dumps(metrics, sort_keys=True))
             continue
         if line.startswith("/rate-answer "):
-            if adaptive is None or last_neural is None:
+            if not enable_adaptive_loop or last_neural is None:
                 print("Sonara> No neural prediction to rate. Enable --enable-adaptive-loop and --enable-world-model.")
                 continue
             try:
@@ -1576,20 +1576,18 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             # Adaptive mode reuses the existing memory owner for bounded retrieval,
             # never converts an observed sentence into an inferred answer.
             evidence = []
-            if adaptive is not None:
+            if enable_adaptive_loop:
                 matches = mem_sys.recall(line, limit=3, min_score=0.35)
                 evidence = [(m, score) for m, score in matches
                             if m.source in ("user_observation", "user_explicit")
                             and overlap(cue_tokens(line), cue_tokens(m.content)) >= 0.10]
             pred = world_model.predict(line) if (enable_world_model and world_model is not None) else None
-            decision = adaptive.decide(line, pred, len(evidence)) if adaptive is not None else None
-            if decision is not None and decision.action == "RECALL_EVIDENCE":
+            decision = adaptive.decide(line, pred, len(evidence))
+            if decision.action == "RECALL_EVIDENCE":
                 excerpts = "; ".join(f'[{m.timestamp_human}] "{m.content[:180]}"' for m, _ in evidence)
                 response = ("RECORDED USER EVIDENCE (not a verified inferred answer): "
                             + excerpts + ". Sonara has not established the answer.")
-            elif pred is not None and (decision.action == "NEURAL_PREDICTION" if decision is not None
-                                      else (pred.answer != "unknown" and pred.confidence >= 0.25
-                                            and pred.uncertainty < 2.2)):
+            elif pred is not None and decision.action == "NEURAL_PREDICTION":
                 response = f"NEURAL WORLD PREDICTION: {pred.answer} (confidence={pred.confidence:.2f}, uncertainty={pred.uncertainty:.2f})"
             elif pred is not None:
                 response = (f"UNKNOWN: Neural World Model uncertainty is high ({pred.uncertainty:.2f}) or missing observation. "
@@ -1604,14 +1602,14 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             "id": uuid.uuid4().hex[:12], "source": "model", "timestamp": now_iso(),
             "session_id": session_id, "event_index": event_index, "text": response,
             "type": ("neural_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response)
-                     else ("evidence_retrieval" if ask and adaptive is not None and decision.action == "RECALL_EVIDENCE"
+                     else ("evidence_retrieval" if ask and enable_adaptive_loop and decision.action == "RECALL_EVIDENCE"
                            else ("abstention" if ask else "acknowledgement"))),
             "verification": ("unverified_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response)
-                             else ("user_evidence_only" if ask and adaptive is not None and decision.action == "RECALL_EVIDENCE"
+                             else ("user_evidence_only" if ask and enable_adaptive_loop and decision.action == "RECALL_EVIDENCE"
                                    else ("unknown" if ask else "no-claim"))),
             "input_id": record["id"],
         }
-        if ask and adaptive is not None:
+        if ask and enable_adaptive_loop:
             answer_record["adaptive_gate"] = {
                 "action": decision.action, "reason": decision.reason,
                 "caution": round(decision.caution, 3),
@@ -1619,7 +1617,7 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
                 "matching_ratings": decision.supporting_ratings,
             }
         append_record(Path(data_dir) / "events.jsonl", answer_record)
-        if ask and adaptive is not None and answer_record["type"] == "neural_prediction":
+        if ask and enable_adaptive_loop and answer_record["type"] == "neural_prediction":
             last_neural = {"question": line, "response_id": answer_record["id"]}
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "end", "timestamp": now_iso()})
     print("Session closed. No automatic learning or knowledge promotion occurred.")
