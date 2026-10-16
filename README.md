@@ -194,3 +194,45 @@ authority would compromise the existing cognition boundary. It does not
 establish improved factual prediction accuracy or general autonomous cognition.
 
 Tests: `python3 -m unittest -v test_sonara_adaptive test_live_boundaries`.
+
+## Experience-to-causal-learning experiment (opt-in; synthetic only)
+
+The `experience` mode tests a full **prediction → chosen action → verified
+environmental consequence → one neural gradient update → later prediction
+and decision** cycle. It uses the existing `SonaraWorldModel.learn_step`
+and `SonaraMemorySystem.remember` owners; there is no separate learner,
+memory graph, action runtime, or language-checkpoint authority.
+
+```bash
+python3 LLM_Training.py --mode experience --experience-seeds 3 \
+  --experience-dim 24 --experience-heldout 3 \
+  --data-dir learning_data --experience-output artifacts/causal_learning_report.json
+python3 -m unittest -v test_causal_loop
+```
+
+In each randomly initialized, counterbalanced two-route micro-world, Sonara
+receives a scene naming two controls and two possible destinations but **not
+their effects**. The neural model predicts the effects of possible actions.
+A fixed experimental score rule selects a control for a goal; only the
+simulator can reveal the true destination after execution. Exactly **one**
+verified outcome updates the existing world-model weights. The canonical
+memory owner stores both the action and the observed outcome with separate
+provenance. A holdout uses unfamiliar actor/object names and never places
+outcome text into the model's prediction input.
+
+The JSON report records goal-success changes, correct-destination
+probabilities and rankings, model parameter changes, sample choices, frozen
+no-gradient controls, deliberately **incorrect-label** controls, checkpoint
+restart equivalence, and reloaded canonical memories. All conditions start
+with identical weights. The test *reports* whether decisions improved, it
+does not assert that one gradient step necessarily succeeds. Restart traces
+and checkpoints are stored under `learning_data/causal_runs`; the report
+under `artifacts`. Both directories are Git-ignored.
+
+**Evidence boundary:** Passing integration tests demonstrates a real causal
+feedback *signal path*. Improvements, if observed, are limited to a tiny
+synthetic environment and novel entity names—not previously unseen physical
+rules, self-supervised causal discovery, autonomous computer interaction, or
+reliable single-trial generalization. An unchanged or worse held-out result
+is a valid negative experimental finding. This experimental mode does **not**
+enable world-model training in ordinary conversation.
