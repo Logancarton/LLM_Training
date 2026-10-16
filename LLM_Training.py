@@ -1391,11 +1391,12 @@ def learn_approved(data_dir, args, data, word_model, reader, writer, device):
 
 
 def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-instruct",
-                enable_world_model=False, world_checkpoint=""):
+                enable_world_model=False, world_checkpoint="", enable_adaptive_loop=False):
     session_id = uuid.uuid4().hex[:12]
     from sonara_memory import SonaraMemorySystem
     from sonara_research import ResearchCognition
     from sonara_world_model import SonaraWorldModel
+    from sonara_adaptive import AdaptiveLoop, cue_tokens, overlap
     mem_sys = SonaraMemorySystem(Path(data_dir) / "sonara_memories")
     research = ResearchCognition(data_dir, local_model=research_model) if enable_research else None
     world_model = None
@@ -1407,6 +1408,9 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             print(f"[Sonara] Warning: world model checkpoint not loaded: {error}")
             world_model = None
     pending_expectation = None
+    last_research = None
+    adaptive = AdaptiveLoop(read_records(Path(data_dir) / "events.jsonl")) if enable_adaptive_loop else None
+    last_neural = None
 
     print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline")
     if enable_world_model and world_model is not None:
@@ -1414,6 +1418,9 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
     else:
         print("World reasoning: NOT IMPLEMENTED. No programmed location/temporal answers or auto-trained world classifier.")
     print("Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
+    if adaptive is not None:
+        print("Adaptive gate: ON. /rate-answer <0..1> rates the immediately preceding neural prediction.")
+        print("The gate learns caution, not facts or neural world-model weights.")
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "start", "timestamp": now_iso(), "local_user": "owner"})
     event_index = 0
     while True:
@@ -1482,6 +1489,26 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             last_research = None
             print("Sonara> Local research utility feedback:", json.dumps(metrics, sort_keys=True))
             continue
+        if line.startswith("/rate-answer "):
+            if adaptive is None or last_neural is None:
+                print("Sonara> No neural prediction to rate. Enable --enable-adaptive-loop and --enable-world-model.")
+                continue
+            try:
+                rating = float(line[len("/rate-answer "):].strip())
+                result = adaptive.feedback(last_neural["question"], rating)
+            except ValueError as error:
+                print("Sonara> Invalid answer rating:", error)
+                continue
+            append_record(Path(data_dir) / "events.jsonl", {
+                "id": uuid.uuid4().hex[:12], "source": "user", "timestamp": now_iso(),
+                "session_id": session_id, "event_index": event_index,
+                "type": "adaptive_feedback", "target_type": "neural_prediction",
+                "question": last_neural["question"], "response_id": last_neural["response_id"],
+                "rating": rating,
+            })
+            last_neural = None
+            print(f"Sonara> Decision caution updated: {result}. No world facts or weights changed.")
+            continue
         if line.startswith("/feedback "):
             print("Sonara> No world-model prediction exists to correct. "
                   "Use /remember <observation> or approve supervised Q/A in --mode review.")
@@ -1519,6 +1546,7 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             continue
 
         event_index += 1
+        last_neural = None  # ratings never attach to an earlier, unrelated turn
         ask = line.startswith("/ask ") or line.endswith("?")
         if line.startswith("/ask "):
             line = line[5:].strip()
@@ -1545,17 +1573,28 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
             response = (f"Observation stored at {mem.timestamp_human} ({mem.relative_time()}). "
                         "Optional supervised Q/A candidate created; NO neural training occurred.")
         else:
-            if enable_world_model and world_model is not None:
-                pred = world_model.predict(line)
-                if pred.answer != "unknown" and pred.confidence >= 0.25 and pred.uncertainty < 2.2:
-                    response = f"NEURAL WORLD PREDICTION: {pred.answer} (confidence={pred.confidence:.2f}, uncertainty={pred.uncertainty:.2f})"
-                else:
-                    response = (f"UNKNOWN: Neural World Model uncertainty is high ({pred.uncertainty:.2f}) or missing observation. "
-                                "Use /recall <terms> to inspect recorded evidence.")
+            # Adaptive mode reuses the existing memory owner for bounded retrieval,
+            # never converts an observed sentence into an inferred answer.
+            evidence = []
+            if adaptive is not None:
+                matches = mem_sys.recall(line, limit=3, min_score=0.35)
+                evidence = [(m, score) for m, score in matches
+                            if m.source in ("user_observation", "user_explicit")
+                            and overlap(cue_tokens(line), cue_tokens(m.content)) >= 0.10]
+            pred = world_model.predict(line) if (enable_world_model and world_model is not None) else None
+            decision = adaptive.decide(line, pred, len(evidence)) if adaptive is not None else None
+            if decision is not None and decision.action == "RECALL_EVIDENCE":
+                excerpts = "; ".join(f'[{m.timestamp_human}] "{m.content[:180]}"' for m, _ in evidence)
+                response = ("RECORDED USER EVIDENCE (not a verified inferred answer): "
+                            + excerpts + ". Sonara has not established the answer.")
+            elif pred is not None and (decision.action == "NEURAL_PREDICTION" if decision is not None
+                                      else (pred.answer != "unknown" and pred.confidence >= 0.25
+                                            and pred.uncertainty < 2.2)):
+                response = f"NEURAL WORLD PREDICTION: {pred.answer} (confidence={pred.confidence:.2f}, uncertainty={pred.uncertainty:.2f})"
+            elif pred is not None:
+                response = (f"UNKNOWN: Neural World Model uncertainty is high ({pred.uncertainty:.2f}) or missing observation. "
+                            "Use /recall <terms> to inspect recorded evidence.")
             else:
-                # Abstain rather than route natural-language questions through
-                # programmed temporal answers or a synthetic phrase generator.
-                # Raw memory is available separately with explicit provenance.
                 response = ("UNKNOWN: No trained world-question answering mechanism has been "
                             "validated. Use /recall <terms> to inspect recorded evidence. "
                             "The language-training checkpoint is not a knowledge authority.")
@@ -1564,11 +1603,24 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
         answer_record = {
             "id": uuid.uuid4().hex[:12], "source": "model", "timestamp": now_iso(),
             "session_id": session_id, "event_index": event_index, "text": response,
-            "type": "neural_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response) else ("abstention" if ask else "acknowledgement"),
-            "verification": "unverified_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response) else ("unknown" if ask else "no-claim"),
+            "type": ("neural_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response)
+                     else ("evidence_retrieval" if ask and adaptive is not None and decision.action == "RECALL_EVIDENCE"
+                           else ("abstention" if ask else "acknowledgement"))),
+            "verification": ("unverified_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response)
+                             else ("user_evidence_only" if ask and adaptive is not None and decision.action == "RECALL_EVIDENCE"
+                                   else ("unknown" if ask else "no-claim"))),
             "input_id": record["id"],
         }
+        if ask and adaptive is not None:
+            answer_record["adaptive_gate"] = {
+                "action": decision.action, "reason": decision.reason,
+                "caution": round(decision.caution, 3),
+                "confidence_bar": round(decision.confidence_bar, 3),
+                "matching_ratings": decision.supporting_ratings,
+            }
         append_record(Path(data_dir) / "events.jsonl", answer_record)
+        if ask and adaptive is not None and answer_record["type"] == "neural_prediction":
+            last_neural = {"question": line, "response_id": answer_record["id"]}
     append_record(Path(data_dir) / "sessions.jsonl", {"id": session_id, "type": "end", "timestamp": now_iso()})
     print("Session closed. No automatic learning or knowledge promotion occurred.")
 
@@ -1740,6 +1792,8 @@ def main():
                         help="Enable experimental neural World Model in live session")
     parser.add_argument("--world-checkpoint", default="",
                         help="Path to neural World Model checkpoint")
+    parser.add_argument("--enable-adaptive-loop", action="store_true",
+                        help="Use cue-scoped explicit feedback to calibrate neural answer caution and bounded recall")
     parser.add_argument("--candidate-id", default="", help="ID to correct or revoke in --mode revise")
     parser.add_argument("--question", default="", help="Question for strictly weights-only evaluation")
     parser.add_argument("--expected", default="", help="Optional expected answer for teacher-forced score")
@@ -1802,7 +1856,8 @@ def main():
         run_session(args.data_dir, enable_research=args.enable_research,
                     research_model=args.research_model,
                     enable_world_model=args.enable_world_model,
-                    world_checkpoint=args.world_checkpoint)
+                    world_checkpoint=args.world_checkpoint,
+                    enable_adaptive_loop=args.enable_adaptive_loop)
         return
     training, valid, originals_count, synth_count = build_examples(args.examples, args.seed, args.ideas_file, args.details_file)
     data = encode_data(training, valid)
