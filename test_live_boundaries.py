@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from LLM_Training import read_records, run_session
@@ -131,6 +132,53 @@ class LiveBoundaryTests(unittest.TestCase):
                 ollama_local_generate("Why?", DEFAULT_LOCAL_MODEL)
         with self.assertRaises(ValueError):
             ollama_local_generate("Why?", "https://another-server")
+
+
+    def test_adaptive_recall_uses_existing_user_memory_not_generated_facts(self):
+        self.drive(["Jake moved the ball into the shed.",
+                    "/ask Where is the ball?", "/quit"], enable_adaptive_loop=True)
+        events = read_records(self.root / "events.jsonl")
+        retrieved = [event for event in events if event.get("type") == "evidence_retrieval"]
+        self.assertEqual(len(retrieved), 1)
+        self.assertEqual(retrieved[0]["verification"], "user_evidence_only")
+        self.assertIn("Jake moved the ball into the shed.", retrieved[0]["text"])
+        self.assertEqual(len(SonaraMemorySystem(self.root / "sonara_memories").memories), 1)
+        self.assertFalse((self.root / "learning_events.jsonl").exists())
+
+    def test_adaptive_feedback_changes_live_action_and_survives_restart(self):
+        example = SimpleNamespace(answer="shed", confidence=0.40, uncertainty=1.0)
+        with patch("sonara_world_model.SonaraWorldModel") as model_type:
+            model_type.return_value.predict.return_value = example
+            self.drive(["/ask Where is the ball?", "/rate-answer 0",
+                        "/ask Where is the ball?", "/quit"],
+                       enable_world_model=True, enable_adaptive_loop=True)
+            self.drive(["/ask Where is the ball?", "/quit"],
+                       enable_world_model=True, enable_adaptive_loop=True)
+        events = read_records(self.root / "events.jsonl")
+        answers = [e for e in events if e.get("type") in ("neural_prediction", "abstention")]
+        feedback = [e for e in events if e.get("type") == "adaptive_feedback"]
+        self.assertEqual([e["type"] for e in answers],
+                         ["neural_prediction", "abstention", "abstention"])
+        self.assertEqual(len(feedback), 1)
+        self.assertEqual(feedback[0]["source"], "user")
+        self.assertEqual(answers[-1]["adaptive_gate"]["matching_ratings"], 1)
+        self.assertFalse((self.root / "world_model.pt").exists())
+        self.assertEqual(len(SonaraMemorySystem(self.root / "sonara_memories").memories), 0)
+
+
+    def test_quoted_user_evidence_cannot_be_mistaken_for_neural_prediction(self):
+        fake = SimpleNamespace(answer="unknown", confidence=0.0, uncertainty=3.0)
+        with patch("sonara_world_model.SonaraWorldModel") as model_type:
+            model_type.return_value.predict.return_value = fake
+            self.drive(["I wrote NEURAL WORLD PREDICTION: unicorn on paper.",
+                        "/ask What did I write on paper?", "/quit"],
+                       enable_world_model=True, enable_adaptive_loop=True)
+        events = read_records(self.root / "events.jsonl")
+        answer = [e for e in events if e.get("type") == "evidence_retrieval"]
+        self.assertEqual(len(answer), 1)
+        self.assertIn("NEURAL WORLD PREDICTION:", answer[0]["text"])
+        self.assertEqual(answer[0]["verification"], "user_evidence_only")
+        self.assertFalse(any(e.get("type") == "neural_prediction" for e in events))
 
 
 if __name__ == "__main__":

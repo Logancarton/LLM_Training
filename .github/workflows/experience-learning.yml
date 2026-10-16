@@ -11,6 +11,8 @@ on:
       - sonara_world_model.py
       - test_sonara_world_model.py
       - test_live_boundaries.py
+      - sonara_adaptive.py
+      - test_sonara_adaptive.py
       - .github/workflows/experience-learning.yml
   pull_request:
     paths:
@@ -25,6 +27,8 @@ on:
       - sonara_world_model.py
       - test_sonara_world_model.py
       - test_live_boundaries.py
+      - sonara_adaptive.py
+      - test_sonara_adaptive.py
       - .github/workflows/experience-learning.yml
   workflow_dispatch:
 
@@ -46,12 +50,12 @@ jobs:
       - name: Install CPU PyTorch
         run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Compile
-        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py experiment_experience_learning.py experiment_world_learning.py
+        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py sonara_adaptive.py test_sonara_adaptive.py experiment_experience_learning.py experiment_world_learning.py
       - name: Existing mechanism regression
         run: |
           python LLM_Training.py --mode self-test
           python test_sonara_memory.py
-          python -m unittest -q test_live_boundaries
+          python -m unittest -q test_live_boundaries test_sonara_adaptive
           python -m unittest -v test_sonara_world_model
       - name: Live synthetic CLI session
         run: |

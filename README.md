@@ -159,3 +159,38 @@ before enabling live world reasoning by default.
 
 Security: logs and checkpoints are local but not encrypted. Do not place
 patient health information or other secrets in this prototype.
+
+## Optional feedback-calibrated adaptive loop (uploaded `sonara_loop` transplant)
+
+The uploaded standalone loop was evaluated as *donor mechanism evidence*, not
+copied into a second runtime. Its pre/post-turn feedback concept, cautious
+action gating, and retrieval fallback are now integrated into the existing
+`LLM_Training.py --mode session` path. The **existing** world model remains
+the only neural prediction owner, `SonaraMemorySystem` remains the only episodic
+memory owner, and explicit user feedback stays in `events.jsonl`.
+
+```bash
+python3 LLM_Training.py --mode session --enable-adaptive-loop --data-dir learning_data/local_test
+# Add --enable-world-model --world-checkpoint path/to/world_model.pt
+# only when you have deliberately trained and validated that checkpoint.
+```
+
+With the adaptive flag, asking a question first considers bounded matching
+user observations (shown **as verbatim evidence, not as an inferred answer**)
+and an explicitly enabled neural prediction. A neural answer still needs to
+pass the confidence/uncertainty gate. After a neural answer, enter
+`/rate-answer 0` (bad) through `/rate-answer 1` (good). That explicit
+feedback calibrates caution for related question cues. The action decision,
+supporting ratings and threshold are appended to the normal event log.
+Caution survives restart, but **does not train or validate world-model weights**.
+Implicit user replies, LLM outputs, and unverified reflections never become
+learning labels. Without the flag, existing session behavior is unchanged.
+
+**Scope:** Integrated and opt-in, not enabled by default. This is a bounded
+adaptive action/feedback loop, **not yet** the ZIP's unattended heartbeat,
+macOS launch agent, web panel, automatic sensor, emotion model, or separate
+SQLite graph. Those are intentionally not introduced: parallel memory/runtime
+authority would compromise the existing cognition boundary. It does not
+establish improved factual prediction accuracy or general autonomous cognition.
+
+Tests: `python3 -m unittest -v test_sonara_adaptive test_live_boundaries`.
