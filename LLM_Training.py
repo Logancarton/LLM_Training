@@ -1601,11 +1601,11 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
         answer_record = {
             "id": uuid.uuid4().hex[:12], "source": "model", "timestamp": now_iso(),
             "session_id": session_id, "event_index": event_index, "text": response,
-            "type": ("neural_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response)
-                     else ("evidence_retrieval" if ask and enable_adaptive_loop and decision.action == "RECALL_EVIDENCE"
+            "type": ("neural_prediction" if ask and decision.action == "NEURAL_PREDICTION"
+                     else ("evidence_retrieval" if ask and decision.action == "RECALL_EVIDENCE"
                            else ("abstention" if ask else "acknowledgement"))),
-            "verification": ("unverified_prediction" if (enable_world_model and "NEURAL WORLD PREDICTION" in response)
-                             else ("user_evidence_only" if ask and enable_adaptive_loop and decision.action == "RECALL_EVIDENCE"
+            "verification": ("unverified_prediction" if ask and decision.action == "NEURAL_PREDICTION"
+                             else ("user_evidence_only" if ask and decision.action == "RECALL_EVIDENCE"
                                    else ("unknown" if ask else "no-claim"))),
             "input_id": record["id"],
         }
