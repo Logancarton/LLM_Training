@@ -13,6 +13,8 @@ on:
       - test_live_boundaries.py
       - sonara_adaptive.py
       - test_sonara_adaptive.py
+      - experiment_causal_loop.py
+      - test_causal_loop.py
       - .github/workflows/experience-learning.yml
   pull_request:
     paths:
@@ -29,6 +31,8 @@ on:
       - test_live_boundaries.py
       - sonara_adaptive.py
       - test_sonara_adaptive.py
+      - experiment_causal_loop.py
+      - test_causal_loop.py
       - .github/workflows/experience-learning.yml
   workflow_dispatch:
 
@@ -50,12 +54,12 @@ jobs:
       - name: Install CPU PyTorch
         run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Compile
-        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py sonara_adaptive.py test_sonara_adaptive.py experiment_experience_learning.py experiment_world_learning.py
+        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py sonara_adaptive.py test_sonara_adaptive.py experiment_causal_loop.py test_causal_loop.py experiment_experience_learning.py experiment_world_learning.py
       - name: Existing mechanism regression
         run: |
           python LLM_Training.py --mode self-test
           python test_sonara_memory.py
-          python -m unittest -q test_live_boundaries test_sonara_adaptive
+          python -m unittest -q test_live_boundaries test_sonara_adaptive test_causal_loop
           python -m unittest -v test_sonara_world_model
       - name: Live synthetic CLI session
         run: |
@@ -74,6 +78,15 @@ jobs:
       - name: Neural world model benchmark (3 seeds)
         run: |
           python experiment_world_learning.py --seeds 3 --steps 40 --output artifacts/world_learning_report.json
+      - name: One-experience causal transfer gate
+        run: |
+          python LLM_Training.py --mode experience --experience-seeds 2 --experience-dim 16 --experience-heldout 2 --device cpu --data-dir "$RUNNER_TEMP/causal_learning" --experience-output artifacts/causal_learning_report.json
+          python - <<'PY'
+          import json
+          r = json.load(open('artifacts/causal_learning_report.json'))
+          assert r['summary']['one_verified_experience_per_seed']
+          assert r['summary']['all_verifications_passed']
+          PY
       - name: Publish experiment data
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,4 +95,5 @@ jobs:
           path: |
             artifacts/experience_learning_report.json
             artifacts/world_learning_report.json
+            artifacts/causal_learning_report.json
           if-no-files-found: warn
