@@ -166,5 +166,20 @@ class LiveBoundaryTests(unittest.TestCase):
         self.assertEqual(len(SonaraMemorySystem(self.root / "sonara_memories").memories), 0)
 
 
+    def test_quoted_user_evidence_cannot_be_mistaken_for_neural_prediction(self):
+        fake = SimpleNamespace(answer="unknown", confidence=0.0, uncertainty=3.0)
+        with patch("sonara_world_model.SonaraWorldModel") as model_type:
+            model_type.return_value.predict.return_value = fake
+            self.drive(["I wrote NEURAL WORLD PREDICTION: unicorn on paper.",
+                        "/ask What did I write on paper?", "/quit"],
+                       enable_world_model=True, enable_adaptive_loop=True)
+        events = read_records(self.root / "events.jsonl")
+        answer = [e for e in events if e.get("type") == "evidence_retrieval"]
+        self.assertEqual(len(answer), 1)
+        self.assertIn("NEURAL WORLD PREDICTION:", answer[0]["text"])
+        self.assertEqual(answer[0]["verification"], "user_evidence_only")
+        self.assertFalse(any(e.get("type") == "neural_prediction" for e in events))
+
+
 if __name__ == "__main__":
     unittest.main()
