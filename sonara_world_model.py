@@ -153,7 +153,6 @@ class CharSubwordEmbedding(nn.Module):
             all_buckets.extend(b)
             offsets.append((start, len(all_buckets)))
         flat_ids = torch.tensor(all_buckets, dtype=torch.long, device=device)
-        flat_vecs = self.hash_embeddings(flat_ids)
         if self._vectorized_char_bags:
             # Equivalent per-token means in one embedding-bag kernel. Hash indices
             # are weight-independent, while gradients still reach hash_embeddings.
@@ -161,6 +160,7 @@ class CharSubwordEmbedding(nn.Module):
             return F.embedding_bag(
                 flat_ids, self.hash_embeddings.weight, starts, mode="mean"
             )
+        flat_vecs = self.hash_embeddings(flat_ids)
         char_vecs = [flat_vecs[s:e].mean(dim=0) for s, e in offsets]
         return torch.stack(char_vecs, dim=0)
 
@@ -1128,6 +1128,10 @@ class SonaraWorldModel:
         self.session_events: List[str] = []
         self.active_expectations: List[Dict[str, Any]] = []
         self.replay_buckets: Dict[str, List[Tuple[List[str], str, str]]] = defaultdict(list)
+        self._max_replay_buckets = 64
+        self._session_event_terms: List[frozenset[str]] = []
+        self._sparse_session_activation = True
+        self._max_active_events = 24
         self.trained_examples_count: int = 0
         self.enabled: bool = False
 
@@ -1157,16 +1161,47 @@ class SonaraWorldModel:
         cleaned = observation.strip()
         if cleaned:
             self.session_events.append(cleaned)
-            self.register_vocabulary(tokenize(cleaned))
+            terms = frozenset(tokenize(cleaned))
+            self._session_event_terms.append(terms)
+            self.register_vocabulary(terms)
 
     def clear_session(self) -> None:
         self.session_events.clear()
+        self._session_event_terms.clear()
         self.active_expectations.clear()
 
+    def _activate_session_events(self, question: str) -> List[str]:
+        """Conservative bounded activation from the existing session evidence.
+
+        Skip only clearly unrelated events. When temporal continuity would
+        overflow the budget, fall back to full evidence rather than fabricate
+        a confident answer from a truncated causal sequence. No memory mutation.
+        """
+        history = self.session_events
+        budget = self._max_active_events
+        if not self._sparse_session_activation or len(history) <= budget:
+            return history
+        cues = set(tokenize(question)) - STOPWORDS - STRUCTURAL_WORDS
+        if not cues:
+            return history
+        matches = [
+            i for i, terms in enumerate(self._session_event_terms)
+            if cues.intersection(terms)
+        ]
+        if not matches:
+            return history
+        selected = set(range(max(0, len(history) - 2), len(history)))
+        for i in matches:
+            selected.update(range(max(0, i - 1), min(len(history), i + 2)))
+            if len(selected) > budget:
+                # Ambiguous or unusually long dependency: do not prune.
+                return history
+        return [history[i] for i in sorted(selected)]
+
     def predict(self, question: str, events: Optional[List[str]] = None) -> WorldPrediction:
-        """Produce a neural prediction for a question given observations."""
+        """Predict from evidence; selectively activate only long live histories."""
         self.model.eval()
-        evs = events if events is not None else self.session_events
+        evs = events if events is not None else self._activate_session_events(question)
         with torch.no_grad():
             _, pred = self.model(evs, question, self.word_to_id, self.device)
         return pred
@@ -1211,6 +1246,10 @@ class SonaraWorldModel:
         bucket.append((list(events), question, verified_answer))
         if len(bucket) > 8:
             bucket.pop(0)
+        # Replay is derived from verified feedback and remains bounded.
+        if len(self.replay_buckets) > self._max_replay_buckets:
+            oldest = next(iter(self.replay_buckets))
+            del self.replay_buckets[oldest]
         metrics["loss"] = round(float(primary_loss.detach().item()), 4)
         metrics["replay_examples"] = len(losses) - 1
         return metrics
@@ -1301,11 +1340,12 @@ class SonaraWorldModel:
         temp_path = str(target) + ".tmp"
 
         payload = {
-            "version": 1,
-            "architecture": {"dim": self.dim},
+            "version": 2,
+            "architecture": {"dim": self.dim, "family": "temporal_hierarchical"},
             "word_to_id": self.word_to_id,
             "id_to_word": self.id_to_word,
             "trained_examples_count": self.trained_examples_count,
+            "replay_buckets": dict(self.replay_buckets),
             "state_dict": self.model.state_dict(),
         }
         try:
@@ -1325,8 +1365,39 @@ class SonaraWorldModel:
         except TypeError:
             payload = torch.load(target, map_location=self.device)
 
+        # Check first: a former model's layers can have different shapes even
+        # when its checkpoint also claims version 1. Never partially mutate
+        # a live owner or overwrite an incompatible identity-bearing model.
+        dims = payload.get("architecture", {}).get("dim")
+        old_state = payload["state_dict"]
+        current = self.model.state_dict()
+        if dims != self.dim or old_state.keys() != current.keys() or any(
+            tuple(old_state[key].shape) != tuple(current[key].shape)
+            for key in current
+        ):
+            raise ValueError(
+                "Incompatible world-model checkpoint architecture; original weights "
+                "must be preserved and explicitly migrated or retrained"
+            )
+        if payload.get("version") not in (1, 2):
+            raise ValueError("Unsupported world-model checkpoint version")
+        restored = payload.get("replay_buckets", {})
+        if not isinstance(restored, dict) or len(restored) > self._max_replay_buckets:
+            raise ValueError("Invalid or unbounded checkpoint replay data")
+        for key, examples in restored.items():
+            if not isinstance(key, str) or not isinstance(examples, list) or len(examples) > 8:
+                raise ValueError("Malformed checkpoint replay bucket")
+            for example in examples:
+                if (
+                    not isinstance(example, (tuple, list)) or len(example) != 3
+                    or not isinstance(example[0], list)
+                    or not all(isinstance(part, str) for part in example[0])
+                    or not all(isinstance(part, str) for part in example[1:])
+                ):
+                    raise ValueError("Malformed verified replay example")
+        self.model.load_state_dict(old_state)
         self.word_to_id = payload.get("word_to_id", self.word_to_id)
         self.id_to_word = payload.get("id_to_word", self.id_to_word)
         self.trained_examples_count = payload.get("trained_examples_count", 0)
-        self.model.load_state_dict(payload["state_dict"])
+        self.replay_buckets = defaultdict(list, restored)
         self.model.eval()
