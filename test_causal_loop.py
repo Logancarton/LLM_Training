@@ -6,7 +6,7 @@ import unittest
 from sonara_memory import SonaraMemorySystem
 from experiment_causal_loop import (
     ACTIONS, DESTINATIONS, HELDOUT, TRAIN_ACTOR, TRAIN_OBJECT,
-    TwoRouteWorld, context, question, run_seed,
+    TwoRouteWorld, context, question, run_seed, run_pair_seed,
 )
 
 
@@ -57,6 +57,51 @@ class CausalExperienceTests(unittest.TestCase):
             self.assertIn(f"to {observed}.", outcomes[0])
             self.assertNotIn(f"to {wrong}.", outcomes[0])
             self.assertEqual(report["trial"]["false_label_control_update"]["trained_count"], 1)
+
+
+    def test_two_verified_actions_train_same_world_model_and_survive_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_pair_seed(100, dim=16, heldout_count=1,
+                                   steps=8, data_dir=tmp)
+            self.assertEqual(result["verified_experience_count"], 2)
+            self.assertEqual(result["contrast_gradient_steps"], 8)
+            self.assertTrue(all(result["verification"].values()),
+                            result["verification"])
+            self.assertGreater(result["updates"]["action_contrast"]["parameter_delta"], 0)
+            self.assertEqual(result["updates"]["action_contrast"]["trained_count"], 9)
+            self.assertEqual(result["conditions"]["after_two_with_contrast"],
+                             result["conditions"]["after_restart"])
+            self.assertEqual(result["conditions"]["no_gradient"],
+                             result["one_experience"]["conditions"]["before_feedback"])
+            self.assertNotEqual(result["second_trial"]["action"],
+                                result["one_experience"]["trial"]["selected_action"])
+            self.assertNotEqual(result["second_trial"]["observed_outcome"],
+                                result["one_experience"]["trial"]["verified_observed_outcome"])
+            memory = SonaraMemorySystem(
+                Path(result["one_experience"]["artifacts_directory"]) / "sonara_memories")
+            self.assertEqual(len(memory.memories), 4)
+
+    def test_contrast_rejects_unobserved_or_unrepresentable_counterfactual(self):
+        from sonara_world_model import SonaraWorldModel
+        model = SonaraWorldModel(device="cpu", dim=16)
+        events = context(TRAIN_ACTOR, TRAIN_OBJECT)
+        query_tap = question(TRAIN_ACTOR, TRAIN_OBJECT, "tap")
+        query_hold = question(TRAIN_ACTOR, TRAIN_OBJECT, "hold")
+        before = [weight.detach().clone() for weight in model.model.parameters()]
+        for pairs in (
+            [(query_tap, "north")],
+            [(query_tap, "north"), (query_tap, "south")],
+            [(query_tap, "north"), (query_hold, "north")],
+            [(query_tap, "north"), (query_hold, "secret_destination")],
+        ):
+            with self.assertRaises(ValueError):
+                model.learn_action_contrast(events, pairs)
+        self.assertEqual(model.trained_examples_count, 0)
+        self.assertTrue(all(
+            (weight == previous).all().item()
+            for weight, previous in zip(model.model.parameters(), before)))
+
+
 
 
 if __name__ == "__main__":
