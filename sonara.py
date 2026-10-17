@@ -36,6 +36,7 @@ LR = 0.01
 STEPS = 10  # learning steps per verified question
 TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
 RULE_GRID = (0.1, 0.2, 0.4, 0.8)
+METHODS = ("baseline", "rule", "control", "sonara")
 
 
 def clock_phases(epoch: float) -> Tuple[float, float, float]:
@@ -161,15 +162,17 @@ def run(store: Store) -> List[Dict]:
     for q in sorted(store.questions(), key=lambda q: q["asked_epoch"]):
         if q["split"] == "eval":
             if q["correct_ids"]:
-                ranked = sonara.rank(store, q, history)
-                results.append({
-                    "q": q, "n_train": len(labeled), "sonara_top": ranked[:K],
-                    "sonara": hit(ranked, q["correct_ids"]),
-                    "control": hit(control.rank(store, q, history), q["correct_ids"]),
-                    "baseline": hit(baseline_rank(store, q["question"], q["asked_epoch"], params), q["correct_ids"]),
-                    "rule": hit(rule_rank(store, params, bonus, q["question"], q["asked_epoch"], history),
-                                q["correct_ids"]),
-                })
+                ranked = {
+                    "baseline": baseline_rank(store, q["question"], q["asked_epoch"], params),
+                    "rule": rule_rank(store, params, bonus, q["question"], q["asked_epoch"], history),
+                    "control": control.rank(store, q, history),
+                    "sonara": sonara.rank(store, q, history),
+                }
+                r = {"q": q, "n_train": len(labeled), "sonara_top": ranked["sonara"][:K]}
+                for name, ranking in ranked.items():  # top-1 is the target; recall@5 alongside
+                    r[name] = hit(ranking, q["correct_ids"], k=1)
+                    r[name + "@5"] = hit(ranking, q["correct_ids"])
+                results.append(r)
             continue
         if q["correct_ids"]:
             sonara.learn(store, q, history)
@@ -186,15 +189,19 @@ def run(store: Store) -> List[Dict]:
 def report(store: Store) -> None:
     results = run(store)
     print(f"\n{len(results)} eval questions, each scored as of the second it was asked, in {PERIODS} periods")
-    print(" period ends | train qs learned | baseline |   rule | control | sonara | vs baseline | vs control")
     size = math.ceil(len(results) / PERIODS) if results else 1
-    for i in range(0, len(results), size):
-        chunk = results[i:i + size]
-        pct = {k: 100 * statistics.mean(r[k] for r in chunk) for k in ("baseline", "rule", "control", "sonara")}
-        end = dt.datetime.fromtimestamp(chunk[-1]["q"]["asked_epoch"])
-        print(f" {end:%Y-%m-%d} | {chunk[-1]['n_train']:16} | {pct['baseline']:7.1f}% | {pct['rule']:5.1f}% | "
-              f"{pct['control']:6.1f}% | {pct['sonara']:5.1f}% | {pct['sonara'] - pct['baseline']:+11.1f} | "
-              f"{pct['sonara'] - pct['control']:+.1f}")
+    for metric, suffix in (("top-1 (target)", ""), (f"recall@{K}", "@5")):
+        print(f"\n{metric}\n period ends | train qs learned | baseline |   rule | control | sonara | vs baseline | vs control")
+        for i in range(0, len(results), size):
+            chunk = results[i:i + size]
+            pct = {k: 100 * statistics.mean(r[k + suffix] for r in chunk) for k in METHODS}
+            end = dt.datetime.fromtimestamp(chunk[-1]["q"]["asked_epoch"])
+            print(f" {end:%Y-%m-%d} | {chunk[-1]['n_train']:16} | {pct['baseline']:7.1f}% | {pct['rule']:5.1f}% | "
+                  f"{pct['control']:6.1f}% | {pct['sonara']:5.1f}% | {pct['sonara'] - pct['baseline']:+11.1f} | "
+                  f"{pct['sonara'] - pct['control']:+.1f}")
+    judged = [r["q"]["answer_ok"] for r in results if r["q"].get("answer_ok") is not None]
+    if judged:  # Qwen answered from the baseline's top 5, so this measures the baseline's answers
+        print(f"answer_ok (baseline answered): {sum(judged)}/{len(judged)}")
     if results:
         print("final weights:", ", ".join(f"{n}={w:+.2f}" for n, w in zip(FEATURES, run.final_weights)))
     for r in [r for r in results if not r["sonara"]][-20:]:  # the 20 most recent misses

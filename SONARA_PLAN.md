@@ -42,7 +42,7 @@ The last three are the "what past feedback said" part. They count only train-spl
 
 **Learning curve.** Every eval question is scored by each method as it stood at the second the question was asked. The baseline and rule are re-tuned on all earlier train questions every 10 labeled ones. Results are reported in 4 consecutive time periods. "The gap grows with experience" means Sonara's period results rise while the baseline's stay flat.
 
-**No early verdict.** Sonara isn't expected to beat the baseline early on; improvement should be slow. Until there are about 150 eval questions, each run reports the curve (Sonara minus baseline recall@5 vs. number of train questions) and makes no success or failure call. A fixed feedback-bonus rule (memories marked useful for similar past questions get a bonus whose size is tuned on train) is reported next to it as a reference. It shows how much of any gain comes from storing feedback rather than learning from it, but it isn't a success gate. A no-experience control (the same learner, with the three experience inputs always 0) is also reported. Sonara minus this control is the part of the gain that comes from experience, not from a stronger optimizer.
+**No early verdict.** Sonara isn't expected to beat the baseline early on; improvement should be slow. Until there are about 150 eval questions, each run reports the curve (Sonara minus baseline top-1 vs. number of train questions) and makes no success or failure call. A fixed feedback-bonus rule (memories marked useful for similar past questions get a bonus whose size is tuned on train) is reported next to it as a reference. It shows how much of any gain comes from storing feedback rather than learning from it, but it isn't a success gate. A no-experience control (the same learner, with the three experience inputs always 0) is also reported. Sonara minus this control is the part of the gain that comes from experience, not from a stronger optimizer.
 
 **Cost.** One matrix multiply over memories plus one over past questions, about 10 weights. Negligible next to one Qwen embedding.
 
@@ -58,8 +58,8 @@ Time is one continuous progression, not just stamps on events. Every time Sonara
 
 1. **Frozen evaluation set:** questions with known correct memories, written before any training and never used for training.
 2. **Time order:** every eval question is tested only with what was learned from earlier train questions, as described in the learning curve above. Results are reported in 4 consecutive periods.
-3. **Metric:** recall@5 (is a correct memory in the top 5?), plus cost per question.
-4. **Success:** Sonara beats the fixed baseline by at least 5 points recall@5 in each of the last 3 periods, and the gap grows as experience grows. Anything less is reported as no effect.
+3. **Metric (changed 2026-10-17):** top-1 correctness (is the first-ranked memory a correct one?). Recall@5 and `answer_ok` are reported alongside, plus cost per question. Top-1 replaced recall@5 because recall@5 can't see whether the current fact beats its older version (Runs 1, 5). `answer_ok` only measures the system Qwen answered from (the baseline), so it is not a Sonara-vs-baseline comparison.
+4. **Success:** Sonara beats the fixed baseline by at least 5 points top-1 in each of the last 3 periods, and the gap grows as experience grows. Anything less is reported as no effect.
 5. **Every run:** change one thing; read 20 wrong answers before drawing conclusions; add one entry to a lab log.
 
 ## Where experience comes from (decided 2026-10-17)
