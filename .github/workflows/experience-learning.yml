@@ -21,6 +21,9 @@ on:
       - experiment_processing_efficiency.py
       - experiment_replay_budget.py
       - test_world_efficiency.py
+      - test_sparse_cognition.py
+      - experiment_sparse_cognition.py
+      - EXPERIMENT_LEARNED_SPARSE_REPORT.md
       - EXPERIMENT_PROCESSING_EFFICIENCY_REPORT.md
       - test_causal_loop.py
       - .github/workflows/experience-learning.yml
@@ -44,6 +47,9 @@ on:
       - experiment_processing_efficiency.py
       - experiment_replay_budget.py
       - test_world_efficiency.py
+      - test_sparse_cognition.py
+      - experiment_sparse_cognition.py
+      - EXPERIMENT_LEARNED_SPARSE_REPORT.md
       - EXPERIMENT_PROCESSING_EFFICIENCY_REPORT.md
       - test_causal_loop.py
       - .github/workflows/experience-learning.yml
@@ -67,13 +73,13 @@ jobs:
       - name: Install CPU PyTorch
         run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Compile
-        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py sonara_adaptive.py test_sonara_adaptive.py experiment_causal_loop.py test_causal_loop.py experiment_experience_learning.py experiment_world_learning.py experiment_processing_efficiency.py experiment_replay_budget.py test_world_efficiency.py
+        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py sonara_adaptive.py test_sonara_adaptive.py experiment_causal_loop.py test_causal_loop.py experiment_experience_learning.py experiment_world_learning.py experiment_processing_efficiency.py experiment_replay_budget.py test_world_efficiency.py experiment_sparse_cognition.py test_sparse_cognition.py
       - name: Existing mechanism regression
         run: |
           python LLM_Training.py --mode self-test
           python test_sonara_memory.py
           python -m unittest -q test_live_boundaries test_sonara_adaptive test_causal_loop
-          python -m unittest -v test_sonara_world_model test_world_efficiency
+          python -m unittest -v test_sonara_world_model test_world_efficiency test_sparse_cognition
       - name: Live synthetic CLI session
         run: |
           printf 'Jake moved a ball into the pond.\nJake moved a ball into the shed.\n/ask Where was the ball before it was at the shed?\n/ask Where is the ball?\n/recall ball\n/train-world\n/research Why?\n/quit\n' | python LLM_Training.py --mode session --device cpu --data-dir "$RUNNER_TEMP/sonara_synthetic_session" > "$RUNNER_TEMP/session_output.txt"
@@ -83,6 +89,11 @@ jobs:
           grep -q 'Found .* relevant memory' "$RUNNER_TEMP/session_output.txt"
           ! grep -q 'Observed report: ball was' "$RUNNER_TEMP/session_output.txt"
           ! grep -q 'Previously reported location: ball' "$RUNNER_TEMP/session_output.txt"
+      - name: Opt-in learned sparse live CLI smoke
+        run: |
+          printf 'Mara moved the ball into the yard.\n/ask Where is the ball?\n/quit\n' | python LLM_Training.py --mode session --device cpu --enable-world-model --enable-learned-sparse --sparse-budget 2 --data-dir "$RUNNER_TEMP/sonara_sparse_session" > "$RUNNER_TEMP/sparse_session.txt"
+          grep -q 'Learned sparse attention: RESEARCH ONLY' "$RUNNER_TEMP/sparse_session.txt"
+          grep -q 'untrained rankers use full context' "$RUNNER_TEMP/sparse_session.txt"
       - name: Scoped diff whitespace check
         run: git diff --check origin/main...HEAD
       - name: Controlled experience benchmark (3 seeds)
@@ -109,6 +120,8 @@ jobs:
         run: python experiment_processing_efficiency.py --seeds 3 --repetitions 8 --output artifacts/processing_efficiency_report.json
       - name: Replay budget ablations (3 seeds, 40 updates)
         run: python experiment_replay_budget.py --seeds 3 --steps 40 --output artifacts/replay_budget_report.json
+      - name: Learned sparse attention held-out comparison (3 seeds)
+        run: python experiment_sparse_cognition.py --seeds 3 --heldout 5 --budget 4 --output artifacts/learned_sparse_report.json
       - name: Publish experiment data
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,4 +133,5 @@ jobs:
             artifacts/causal_learning_report.json
             artifacts/processing_efficiency_report.json
             artifacts/replay_budget_report.json
+            artifacts/learned_sparse_report.json
           if-no-files-found: warn
