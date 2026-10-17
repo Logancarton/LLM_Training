@@ -1137,7 +1137,8 @@ class SonaraWorldModel:
         # PR #9's full verified replay until an accuracy gate supports a limit.
         self._max_replay_examples_per_update: Optional[int] = None
         self._session_event_terms: List[frozenset[str]] = []
-        self._sparse_session_activation = True
+        # Sparse selection is experimental: do not silently omit unresolved causal history.
+        self._sparse_session_activation = False
         self._max_active_events = 24
         self.trained_examples_count: int = 0
         self.enabled: bool = False
