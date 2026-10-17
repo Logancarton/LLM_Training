@@ -29,8 +29,10 @@ from sonara_text_encoder import PretrainedTextEncoder
 CHAT_MODEL = "qwen2.5:1.5b-instruct"
 CHAT_ENDPOINT = "http://127.0.0.1:11434/api/chat"
 K = 5
-DEFAULT_PARAMS = (0.1, 7.0)  # (recency weight, half-life in days)
-GRID = [(w, h) for w in (0.0, 0.05, 0.1, 0.2, 0.4) for h in (1.0, 7.0, 30.0)]
+# Recency weight, half-life in days, and "bias:<source>" (default 0) per memory source.
+DEFAULT_PARAMS = {"weight": 0.1, "half_life": 7.0}
+GRID = {"weight": (0.0, 0.05, 0.1, 0.2, 0.4), "half_life": (1.0, 7.0, 30.0)}
+BIAS_GRID = (-0.4, -0.2, -0.1, 0.0, 0.1)
 
 
 def split_for(question_id: str) -> str:
@@ -80,14 +82,15 @@ class Store:
 
 
 def baseline_rank(store: Store, question: str, asked_epoch: float,
-                  params: Tuple[float, float] = DEFAULT_PARAMS) -> List[Memory]:
-    """Fixed baseline: cosine similarity + weight * recency, both relative to ask time."""
+                  params: Dict[str, float] = DEFAULT_PARAMS) -> List[Memory]:
+    """Fixed baseline: cosine similarity + weight * recency (relative to ask time) + source bias."""
     mems = store.before(asked_epoch)
     if not mems:
         return []
-    weight, half_life_days = params
     age_days = torch.tensor([(asked_epoch - m.timestamp_epoch) / 86400 for m in mems])
-    scores = store.similarities(question, mems) + weight * torch.exp(-math.log(2) * age_days / half_life_days)
+    recency = torch.exp(-math.log(2) * age_days / params["half_life"])
+    bias = torch.tensor([params.get("bias:" + m.source, 0.0) for m in mems])
+    scores = store.similarities(question, mems) + params["weight"] * recency + bias
     return [mems[i] for i in scores.argsort(descending=True).tolist()]
 
 
@@ -95,13 +98,23 @@ def hit(ranked: Sequence[Memory], correct_ids: Sequence[str], k: int = K) -> boo
     return any(m.id in correct_ids for m in ranked[:k])
 
 
-def tune(store: Store, train: List[Dict]) -> Tuple[float, float]:
-    """Grid-search the baseline's two settings on train questions only."""
+def tune(store: Store, train: List[Dict]) -> Dict[str, float]:
+    """Coordinate ascent over the baseline's settings on train questions only; ties keep the current value."""
+    params = dict(DEFAULT_PARAMS)
     if not train:
-        return DEFAULT_PARAMS
+        return params
+    sources = sorted({m.source for m in store.memory.memories.values()})
+    grid = dict(GRID, **{"bias:" + s: BIAS_GRID for s in sources})
     def recall(p):
         return sum(hit(baseline_rank(store, q["question"], q["asked_epoch"], p), q["correct_ids"]) for q in train)
-    return max(GRID, key=recall)
+    best = recall(params)
+    for _ in range(2):
+        for key, values in grid.items():
+            for v in values:
+                trial = dict(params, **{key: v})
+                if (r := recall(trial)) > best:
+                    params, best = trial, r
+    return params
 
 
 def score(store: Store, split_epoch: Optional[float] = None):
@@ -192,7 +205,7 @@ def main() -> None:
     split = dt.datetime.fromisoformat(args.split).timestamp() if args.split else None
     params, n_train, results = score(store, split)
     hits = [hit(r, q["correct_ids"]) for q, r in results]
-    print(f"baseline params (weight, half-life days) = {params}, tuned on {n_train} train questions")
+    print(f"baseline params = {params}, tuned on {n_train} train questions")
     print(f"recall@{K} = {sum(hits)}/{len(hits)}" + (f" = {100 * sum(hits) / len(hits):.1f}%" if hits else ""))
     misses = [(q, r) for (q, r), h in zip(results, hits) if not h]
     for q, r in misses[:20]:

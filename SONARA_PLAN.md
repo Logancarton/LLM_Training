@@ -35,7 +35,7 @@ Real use. You ask Qwen questions in `sonara_recall.py chat`. The baseline recall
 
 - **Labeling pool:** you label from 15 shuffled candidates (top 10 by similarity + 5 most recent), shown without scores, or by typing a memory id. Labels found this way favor what similarity and recency already surface, so Sonara can mostly win only by re-ranking within the pool. This is a known limit.
 - **Volume:** a 5-point gap needs roughly 150–300 eval questions to tell apart from noise, i.e. about 10 verified questions a day for several weeks.
-- **Fair baseline:** its recency weight and half-life are tuned by grid search on the same train questions Sonara learns from, and never on eval.
+- **Fair baseline:** it gets the same inputs Sonara gets, including each memory's source (note, question, Qwen answer, follow-up). Its recency weight, half-life and per-source bias are tuned on the same train questions Sonara learns from, never on eval. Qwen-generated memories stay in recall; whether they help is for the feedback to show.
 
 ## What the earlier experiments taught us
 

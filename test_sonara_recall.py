@@ -5,7 +5,7 @@ import tempfile
 
 import torch
 
-from sonara_recall import Store, baseline_rank, hit, score, split_for
+from sonara_recall import Store, baseline_rank, hit, score, split_for, tune
 
 
 class FakeEncoder:
@@ -54,6 +54,16 @@ def test_recall():
         assert n_train == sum(q["split"] == "train" for q in store.questions())
         assert results and all(hit(r, q["correct_ids"]) for q, r in results)
         assert score(store, split_epoch=30 * day)[2] == []  # no eval questions after the split
+
+        # Six newer generated memories that resemble the question push the note out of
+        # the top 5; tuning on train questions should learn a penalty for that source.
+        for i in range(6):
+            store.add(f"what Jake did {i}", "qwen_answer").timestamp_epoch = 15 * day
+        train = [{"question": "Jake liked what", "asked_epoch": 20 * day, "correct_ids": [old.id]}]
+        assert not hit(baseline_rank(store, "Jake liked what", 20 * day), [old.id])
+        params = tune(store, train)
+        assert params["bias:qwen_answer"] < 0
+        assert hit(baseline_rank(store, "Jake liked what", 20 * day, params), [old.id])
     finally:
         shutil.rmtree(tmp)
     print("✓ recall tests passed")
