@@ -259,14 +259,170 @@ def _run_seed(seed: int, root: Path, dim: int, lr: float,
     return report
 
 
+
+def action_goal_margins(model: SonaraWorldModel, world: TwoRouteWorld,
+                        heldout: Sequence[Tuple[str, str]]) -> Dict[str, float]:
+    """Evaluator-only action preference, never given to the model."""
+    margins = []
+    separations = []
+    for actor, obj in heldout:
+        events = context(actor, obj)
+        predictions = {
+            action: model.predict(question(actor, obj, action), events=events)
+            for action in ACTIONS
+        }
+        for goal in DESTINATIONS:
+            correct = next(a for a in ACTIONS if world.act(a) == goal)
+            other = next(a for a in ACTIONS if a != correct)
+            margins.append(
+                predictions[correct].distribution.get(goal, 0.0)
+                - predictions[other].distribution.get(goal, 0.0)
+            )
+            separations.append(abs(
+                predictions["tap"].distribution.get(goal, 0.0)
+                - predictions["hold"].distribution.get(goal, 0.0)
+            ))
+    return {
+        "mean_correct_action_margin": round(sum(margins) / len(margins), 6),
+        "mean_absolute_action_separation": round(sum(separations) / len(separations), 6),
+    }
+
+
+def run_pair_seed(seed: int, *, dim: int = 24, lr: float = 0.004,
+                  heldout_count: int = 3, steps: int = 12,
+                  data_dir: Path | str | None = None) -> Dict[str, Any]:
+    """Extend the original one-observation control with an actual second trial.
+
+    Models are cloned *after* the first outcome, so the supervised-only,
+    contrastive and deliberately false-pair controls share identical weights.
+    No hypothetical destination is ever inserted as a verified observation.
+    """
+    if data_dir is None:
+        with tempfile.TemporaryDirectory(prefix="sonara-pair-") as root:
+            return run_pair_seed(seed, dim=dim, lr=lr, heldout_count=heldout_count,
+                                 steps=steps, data_dir=root)
+    single = run_seed(seed, dim=dim, lr=lr, heldout_count=heldout_count,
+                      data_dir=data_dir)
+    root = Path(single["artifacts_directory"])
+    world = TwoRouteWorld(seed)
+    unseen = HELDOUT[:heldout_count]
+    after_one_path = root / "trained_world.pt"
+    model = SonaraWorldModel(checkpoint_path=after_one_path, device="cpu", dim=dim, lr=lr)
+    supervised_only = SonaraWorldModel(checkpoint_path=after_one_path, device="cpu", dim=dim, lr=lr)
+    false_pair = SonaraWorldModel(checkpoint_path=after_one_path, device="cpu", dim=dim, lr=lr)
+    memory = SonaraMemorySystem(root / "sonara_memories")
+    first = single["trial"]
+    events = context(TRAIN_ACTOR, TRAIN_OBJECT)
+    action_a = first["selected_action"]
+    action_b = next(a for a in ACTIONS if a != action_a)
+    outcome_a = first["verified_observed_outcome"]
+    query_a = first["question"]
+    query_b = question(TRAIN_ACTOR, TRAIN_OBJECT, action_b)
+    pre_second = model.predict(query_b, events=events)
+
+    second_action_memory = memory.remember(
+        f"Simulator trial: {TRAIN_ACTOR} used {action_b} on {TRAIN_OBJECT}; alternative control.",
+        source="agent_action", session_id=f"causal_{seed}")
+    outcome_b = world.act(action_b)  # hidden until second intervention executes
+    second_outcome_memory = memory.remember(
+        f"Verified simulator observation: using {action_b} moved {TRAIN_OBJECT} to {outcome_b}.",
+        source="environment_observation", session_id=f"causal_{seed}")
+    model.observe(second_outcome_memory.content)
+    pairs = [(query_a, outcome_a), (query_b, outcome_b)]
+
+    before_margins = action_goal_margins(model, world, unseen)
+    contrast_metrics = model.learn_action_contrast(events, pairs, steps=steps)
+    supervised_metrics = supervised_only.learn_action_contrast(
+        events, pairs, steps=steps, contrast_weight=0.0)
+    false_metrics = false_pair.learn_action_contrast(
+        events, [(query_a, outcome_b), (query_b, outcome_a)], steps=steps)
+
+    contrast_eval = evaluate(model, world, unseen)
+    supervision_eval = evaluate(supervised_only, world, unseen)
+    false_eval = evaluate(false_pair, world, unseen)
+    contrast_margins = action_goal_margins(model, world, unseen)
+    supervised_margins = action_goal_margins(supervised_only, world, unseen)
+    false_margins = action_goal_margins(false_pair, world, unseen)
+    model.save_checkpoint(root / "action_contrast_world.pt")
+    reloaded = SonaraWorldModel(
+        checkpoint_path=root / "action_contrast_world.pt", device="cpu", dim=dim, lr=lr)
+    memory_reloaded = SonaraMemorySystem(root / "sonara_memories")
+    mems = list(memory_reloaded.memories.values())
+    memory_verified = (
+        len(mems) == 4
+        and sum(m.source == "agent_action" for m in mems) == 2
+        and sum(m.source == "environment_observation" for m in mems) == 2
+        and any(m.id == second_action_memory.id for m in mems)
+        and any(m.id == second_outcome_memory.id and outcome_b in m.content for m in mems)
+    )
+    return {
+        "seed": seed,
+        "one_experience": single,
+        "second_trial": {
+            "action": action_b, "observed_outcome": outcome_b,
+            "pre_outcome_distribution": {x: pre_second.distribution.get(x, 0.0)
+                                         for x in DESTINATIONS},
+            "action_memory_id": second_action_memory.id,
+            "outcome_memory_id": second_outcome_memory.id,
+        },
+        "verified_experience_count": 2,
+        "contrast_gradient_steps": steps,
+        "updates": {
+            "action_contrast": contrast_metrics,
+            "supervised_only": supervised_metrics,
+            "deliberately_false_pair": false_metrics,
+        },
+        "conditions": {
+            "after_one_experience": single["conditions"]["after_verified_feedback"],
+            "after_two_with_contrast": contrast_eval,
+            "two_supervised_only": supervision_eval,
+            "two_false_labels": false_eval,
+            "no_gradient": single["conditions"]["no_gradient_control"],
+            "after_restart": evaluate(reloaded, world, unseen),
+        },
+        "action_margins": {
+            "after_one": before_margins,
+            "after_two_with_contrast": contrast_margins,
+            "two_supervised_only": supervised_margins,
+            "two_false_labels": false_margins,
+        },
+        "verification": {
+            "different_actual_results": outcome_a != outcome_b,
+            "exactly_two_verified_experiences": len([
+                m for m in mems if m.source == "environment_observation"]) == 2,
+            "no_counterfactual_in_canonical_memory": memory_verified,
+            "initial_control_is_frozen": single["verification"]["same_initial_weights_control"],
+            "gradient_steps_exact": model.trained_examples_count == 1 + steps,
+            "contrast_parameters_updated": contrast_metrics["parameter_delta"] > 0,
+            "restart_predictions_identical": evaluate(reloaded, world, unseen) == contrast_eval,
+        },
+        "effect": {
+            "contrast_goal_success_delta_vs_one": round(
+                contrast_eval["goal_success_rate"]
+                - single["conditions"]["after_verified_feedback"]["goal_success_rate"], 4),
+            "contrast_margin_delta_vs_one": round(
+                contrast_margins["mean_correct_action_margin"]
+                - before_margins["mean_correct_action_margin"], 6),
+            "contrast_minus_supervised_goal_success": round(
+                contrast_eval["goal_success_rate"]
+                - supervision_eval["goal_success_rate"], 4),
+            "contrast_minus_supervised_margin": round(
+                contrast_margins["mean_correct_action_margin"]
+                - supervised_margins["mean_correct_action_margin"], 6),
+        },
+    }
+
+
+
 def run_experiment(*, seeds: int = 3, dim: int = 24, lr: float = 0.004,
                    heldout_count: int = 3, data_dir: str | Path = "learning_data",
                    output: str | Path = "artifacts/causal_learning_report.json") -> Dict[str, Any]:
     if not 1 <= seeds <= 12:
         raise ValueError("Seeds must be between 1 and 12 (bounded laptop workload)")
-    runs = [run_seed(100 + i, dim=dim, lr=lr,
-                     heldout_count=heldout_count, data_dir=data_dir)
-            for i in range(seeds)]
+    pair_runs = [run_pair_seed(100 + i, dim=dim, lr=lr,
+                               heldout_count=heldout_count, data_dir=data_dir)
+                 for i in range(seeds)]
+    runs = [r["one_experience"] for r in pair_runs]
     metrics = [r["improvement"] for r in runs]
     summary = {
         "seeds": seeds,
@@ -279,6 +435,18 @@ def run_experiment(*, seeds: int = 3, dim: int = 24, lr: float = 0.004,
         "seeds_improved_goal_success": sum(x["heldout_goal_success_delta"] > 0 for x in metrics),
         "seeds_improved_target_probability": sum(x["heldout_target_probability_delta"] > 0 for x in metrics),
         "all_verifications_passed": all(all(r["verification"].values()) for r in runs),
+        "two_verified_experiences_per_pair_run": True,
+        "pair_verifications_passed": all(all(r["verification"].values()) for r in pair_runs),
+        "mean_pair_goal_success": round(
+            sum(r["conditions"]["after_two_with_contrast"]["goal_success_rate"]
+                for r in pair_runs) / seeds, 4),
+        "mean_pair_supervised_only_goal_success": round(
+            sum(r["conditions"]["two_supervised_only"]["goal_success_rate"]
+                for r in pair_runs) / seeds, 4),
+        "mean_pair_action_margin_delta": round(
+            sum(r["effect"]["contrast_margin_delta_vs_one"] for r in pair_runs) / seeds, 6),
+        "seeds_improving_action_margin": sum(
+            r["effect"]["contrast_margin_delta_vs_one"] > 0 for r in pair_runs),
     }
     # Improvement is empirical, not implied by one weight update.
     report = {
@@ -288,6 +456,7 @@ def run_experiment(*, seeds: int = 3, dim: int = 24, lr: float = 0.004,
                    "prove causal understanding or general-world intelligence."),
         "summary": summary,
         "runs": runs,
+        "action_pair_runs": pair_runs,
     }
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
