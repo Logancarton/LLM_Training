@@ -153,7 +153,7 @@ class CharSubwordEmbedding(nn.Module):
             all_buckets.extend(b)
             offsets.append((start, len(all_buckets)))
         flat_ids = torch.tensor(all_buckets, dtype=torch.long, device=device)
-        if self._vectorized_char_bags:
+        if self._vectorized_char_bags and not torch.is_grad_enabled():
             # Equivalent per-token means in one embedding-bag kernel. Hash indices
             # are weight-independent, while gradients still reach hash_embeddings.
             starts = torch.tensor([s for s, _ in offsets], dtype=torch.long, device=device)
@@ -533,7 +533,7 @@ class PointerGeneratorHead(nn.Module):
         ):
             cand_prob_accum = torch.zeros(num_cands, device=device)
             overlap_accum = torch.tensor(0.0, device=device)
-            if self._vectorized_token_scoring:
+            if self._vectorized_token_scoring and not torch.is_grad_enabled():
                 # Score all occurrences in one network call, then keep softmax
                 # within each event. This preserves hierarchical event weights.
                 counts = [len(ids) for ids in event_token_cand_ids]
@@ -1129,6 +1129,9 @@ class SonaraWorldModel:
         self.active_expectations: List[Dict[str, Any]] = []
         self.replay_buckets: Dict[str, List[Tuple[List[str], str, str]]] = defaultdict(list)
         self._max_replay_buckets = 64
+        # Optional experiment-only replay compute cap; the default preserves
+        # PR #9's full verified replay until an accuracy gate supports a limit.
+        self._max_replay_examples_per_update: Optional[int] = None
         self._session_event_terms: List[frozenset[str]] = []
         self._sparse_session_activation = True
         self._max_active_events = 24
@@ -1235,12 +1238,23 @@ class SonaraWorldModel:
         primary_loss = self.model.compute_loss(events, question, verified_answer, self.word_to_id, self.device)
         key = self._bucket_key(events, question, verified_answer)
         losses = [primary_loss]
-        for old_key, examples in self.replay_buckets.items():
-            if old_key != key and examples:
-                replay_events, replay_query, replay_answer = examples[-1]
-                losses.append(self.model.compute_loss(
-                    replay_events, replay_query, replay_answer, self.word_to_id, self.device
-                ))
+        eligible = [
+            (old_key, examples[-1])
+            for old_key, examples in self.replay_buckets.items()
+            if old_key != key and examples
+        ]
+        limit = self._max_replay_examples_per_update
+        if limit is not None and len(eligible) > limit:
+            if limit < 1:
+                raise ValueError("Replay compute cap must be positive")
+            # Round-robin balanced categories; do not let the latest label
+            # become the only authority. No fabricated replay samples.
+            start = self.trained_examples_count % len(eligible)
+            eligible = (eligible[start:] + eligible[:start])[:limit]
+        for _, (replay_events, replay_query, replay_answer) in eligible:
+            losses.append(self.model.compute_loss(
+                replay_events, replay_query, replay_answer, self.word_to_id, self.device
+            ))
         metrics = self._apply_verified_loss(torch.stack(losses).mean(), clip_norm)
         bucket = self.replay_buckets[key]
         bucket.append((list(events), question, verified_answer))
