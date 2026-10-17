@@ -18,8 +18,13 @@ def test_sonara():
         for m in [target] + decoys:
             m.timestamp_epoch = 0.0
         pool = [target.id] + [d.id for d in decoys]
-        for i in range(24):  # the same question keeps needing a memory cosine ranks last
-            store.add_question(f"q{i}", "where did I leave it", (i + 1) * day, [target.id], pool, None)
+        # Half the questions need a decoy that cosine ranks first; the other half keep
+        # needing a memory cosine ranks last, which only experience can single out.
+        things = ("car", "bike", "phone", "wallet", "charger", "book")
+        for i in range(36):
+            question, correct = (("where did I leave it", target) if i % 2 else
+                                 (f"where did I leave the {things[i // 2 % 6]}", decoys[i // 2 % 6]))
+            store.add_question(f"q{i}", question, (i + 1) * day, [correct.id], pool, None)
 
         q = store.questions()[5]
         mems, x = features(store, q["question"], q["asked_epoch"], store.questions())
@@ -29,8 +34,9 @@ def test_sonara():
 
         test, rows = curve(store)
         assert test and len(rows) == 4 and len(FEATURES) == x.shape[1]
-        assert rows[-1]["baseline"] == 0.0
-        assert rows[-1]["sonara"] == 100.0 and rows[-1]["rule"] == 100.0
+        last = rows[-1]
+        print({k: last[k] for k in ("n_train", "baseline", "rule", "no_exp", "sonara")})
+        assert last["sonara"] > last["no_exp"] and last["sonara"] > last["baseline"]
     finally:
         shutil.rmtree(tmp)
     print("✓ sonara tests passed")

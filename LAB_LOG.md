@@ -29,3 +29,9 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Data:** Run 1's 20 questions: 14 train, 6 eval, no time split. This checks the code only; with this little data the numbers say nothing.
 - **Result:** at every training size, the baseline got 5/6, the rule got 5/6 (bonus tuned to 0), and Sonara got 6/6 (sd 0). The gap is one question.
 - **Wrong answers / why:** Sonara's win comes from source weights (note +4.4, generated sources about −4), not from experience. Its experience weights are negative (neighbor vote −4.6, useful count −4.8), because every question here is on a new topic, so a memory's past usefulness doesn't predict future usefulness. The baseline can apply source biases too, but its tuner maximizes hit counts and stops on ties: recency weight 0 already got train to 14/14, so it never tried the biases. Sonara's gradient on the full pool did find them. **That is a difference in optimizer strength, not in experience.** The next change should be one control that isolates experience: the same learner with the three experience inputs zeroed.
+
+## 2026-10-17 · Run 4: no-experience control on Run 1 data
+
+- **Changed:** added the control: the same learner, trained and ranked with an empty history, so its three experience inputs are always 0. Data is the same as Run 3.
+- **Result:** at every training size, the control got 6/6, the same as Sonara. Sonara minus control = +0.0. The +16.7 over the baseline is all optimizer strength (source weights), with nothing from experience. This confirms Run 3's reading.
+- **Test check:** in the synthetic test, the control first reached 100% by learning a negative cosine weight, a shortcut that test happened to allow. Adding questions where cosine is the right signal closes it. Now experience is the only way to find the target: control 46%, Sonara 69%, baseline 54%.

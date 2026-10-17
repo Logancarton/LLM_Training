@@ -131,11 +131,16 @@ def curve(store: Store, split_epoch=None):
         models = [train(store, labeled, history, s) for s in range(SEEDS)]
         sonara = [recall(lambda q, m=m: sonara_rank(store, m, q["question"], q["asked_epoch"], history))
                   for m in models]
+        # Control: same learner, empty history, so the three experience inputs are always 0.
+        no_exp = [recall(lambda q, m=train(store, labeled, [], s): sonara_rank(store, m, q["question"],
+                                                                              q["asked_epoch"], []))
+                  for s in range(SEEDS)]
         rows.append({
             "fraction": f, "n_train": len(labeled), "bonus": bonus, "model": models[0], "history": history,
             "baseline": recall(lambda q: baseline_rank(store, q["question"], q["asked_epoch"], params)),
             "rule": recall(lambda q: rule_rank(store, params, bonus, q["question"], q["asked_epoch"], history)),
             "sonara": statistics.mean(sonara), "sonara_sd": statistics.pstdev(sonara),
+            "no_exp": statistics.mean(no_exp),
         })
     return test, rows
 
@@ -144,10 +149,11 @@ def report(store: Store, split_epoch=None) -> None:
     test, rows = curve(store, split_epoch)
     print(f"\n{len(test)} eval questions" + (f" asked after {dt.datetime.fromtimestamp(split_epoch):%Y-%m-%d}"
                                              if split_epoch else ""))
-    print(" train qs | baseline | rule (bonus) | sonara (sd)  | sonara - baseline")
+    print(" train qs | baseline | rule (bonus) | no-exp | sonara (sd)  | vs baseline | vs no-exp")
     for r in rows:
         print(f" {r['n_train']:8} | {r['baseline']:7.1f}% | {r['rule']:5.1f}% ({r['bonus']:.1f}) | "
-              f"{r['sonara']:5.1f}% ({r['sonara_sd']:.1f}) | {r['sonara'] - r['baseline']:+.1f}")
+              f"{r['no_exp']:5.1f}% | {r['sonara']:5.1f}% ({r['sonara_sd']:.1f}) | "
+              f"{r['sonara'] - r['baseline']:+11.1f} | {r['sonara'] - r['no_exp']:+.1f}")
     last = rows[-1]
     print("weights (seed 0, all train):",
           ", ".join(f"{n}={w:+.2f}" for n, w in zip(FEATURES, last["model"].weight[0].tolist())))
