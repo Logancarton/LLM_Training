@@ -62,13 +62,16 @@ class CausalExperienceTests(unittest.TestCase):
     def test_two_verified_actions_train_same_world_model_and_survive_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = run_pair_seed(100, dim=16, heldout_count=1,
-                                   steps=8, data_dir=tmp)
+                                   steps=12, data_dir=tmp)
             self.assertEqual(result["verified_experience_count"], 2)
-            self.assertEqual(result["contrast_gradient_steps"], 8)
+            self.assertEqual(result["contrast_gradient_steps"], 12)
             self.assertTrue(all(result["verification"].values()),
                             result["verification"])
             self.assertGreater(result["updates"]["action_contrast"]["parameter_delta"], 0)
-            self.assertEqual(result["updates"]["action_contrast"]["trained_count"], 9)
+            self.assertEqual(result["updates"]["action_contrast"]["trained_count"], 13)
+            self.assertEqual(result["conditions"]["after_two_with_contrast"]["goal_success_rate"], 1.0)
+            self.assertGreater(result["action_margins"]["after_two_with_contrast"]["mean_correct_action_margin"], 0.0)
+            self.assertLess(result["action_margins"]["two_false_labels"]["mean_correct_action_margin"], 0.0)
             self.assertEqual(result["conditions"]["after_two_with_contrast"],
                              result["conditions"]["after_restart"])
             self.assertEqual(result["conditions"]["no_gradient"],
