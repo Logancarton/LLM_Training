@@ -58,6 +58,30 @@ class LearnedSparseCognitionTests(unittest.TestCase):
         self.assertEqual(self.owner.session_events, original)
         self.assertEqual(trace["indices"], sorted(set(trace["indices"])))
 
+    def test_long_history_selector_learning_preserves_frozen_world_weights(self):
+        long_history = (
+            ["Mara carried the blue ball into the courtyard."]
+            + [f"Neighbor_{i} examined ornament_{i} by shelf_{i}." for i in range(15)]
+            + ["Mara moved the blue ball into the observatory."]
+        )
+        for name, p in self.owner.model.named_parameters():
+            if not name.startswith("sparse_selector."):
+                p.requires_grad_(False)
+        frozen = {
+            key: value.clone() for key, value in self.owner.model.state_dict().items()
+            if not key.startswith("sparse_selector.")
+        }
+        result = self.owner.train_sparse_attention(
+            long_history, self.question, "observatory", steps=2
+        )
+        self.assertTrue(result["trained"])
+        self.assertGreater(result["parameter_delta"], 0)
+        self.assertEqual(self.owner._sparse_training_updates, 2)
+        self.assertTrue(all(
+            torch.equal(value, self.owner.model.state_dict()[key])
+            for key, value in frozen.items()
+        ))
+
     def test_missing_verified_answer_never_trains_fake_grounding(self):
         before = [p.detach().clone() for p in self.owner.model.sparse_selector.parameters()]
         status = self.owner.train_sparse_attention(
