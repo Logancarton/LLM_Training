@@ -120,7 +120,8 @@ class CharSubwordEmbedding(nn.Module):
         self.hash_embeddings = nn.Embedding(hash_buckets, dim)
         self.projection = nn.Linear(dim * 2, dim)
         self.norm = nn.LayerNorm(dim)
-        self._ngram_cache: Dict[str, List[int]] = {}
+        self._ngram_cache: OrderedDict[str, List[int]] = OrderedDict()
+        self._ngram_cache_capacity = 4096
         # Internal ablation switch: no learned weights or representational features change.
         self._vectorized_char_bags = True
 
@@ -132,6 +133,7 @@ class CharSubwordEmbedding(nn.Module):
         t = token.lower()
         cached = self._ngram_cache.get(t)
         if cached is not None:
+            self._ngram_cache.move_to_end(t)
             return cached
         wrapped = f"<{t}>"
         ngrams = [wrapped[i:i+n] for n in (2, 3) for i in range(len(wrapped) - n + 1)]
@@ -139,6 +141,8 @@ class CharSubwordEmbedding(nn.Module):
             ngrams = [wrapped]
         buckets = [self._hash_ngram(ng) for ng in ngrams]
         self._ngram_cache[t] = buckets
+        if len(self._ngram_cache) > self._ngram_cache_capacity:
+            self._ngram_cache.popitem(last=False)
         return buckets
 
     def embed_char_only(self, token_strings: Sequence[str], device: torch.device) -> torch.Tensor:
@@ -1172,6 +1176,10 @@ class SonaraWorldModel:
         self.session_events.clear()
         self._session_event_terms.clear()
         self.active_expectations.clear()
+        # These caches hold only derived text features, not learned weights.
+        # Explicit session reset must not retain stale episode contents.
+        self.model._event_plan_cache.clear()
+        self.model.embedding._ngram_cache.clear()
 
     def _activate_session_events(self, question: str) -> List[str]:
         """Conservative bounded activation from the existing session evidence.
