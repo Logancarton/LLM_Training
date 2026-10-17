@@ -1163,7 +1163,7 @@ class SonaraWorldModel:
             self.session_events.append(cleaned)
             terms = frozenset(tokenize(cleaned))
             self._session_event_terms.append(terms)
-            self.register_vocabulary(terms)
+            self.register_vocabulary(tokenize(cleaned))
 
     def clear_session(self) -> None:
         self.session_events.clear()
