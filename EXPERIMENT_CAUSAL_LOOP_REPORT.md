@@ -43,3 +43,30 @@ python3 -m unittest -q test_causal_loop
 ```
 
 CI preserves the report JSON as an artifact named `experience-learning-results`; private experimental observations/checkpoints remain Git-ignored under `learning_data/causal_runs`. This simulated environment does not imply continuous autonomous learning in the ordinary session.
+
+
+## Follow-up: two verified actions and contrastive action learning
+
+The experiment has been extended to preserve the original one-action
+baseline and *also* interact with the alternative control. Both outcomes are
+verified by the hidden simulator before entering canonical episodic memory.
+The existing world-model owner receives both (action question, outcome)
+pairs and applies a bounded supervised + pairwise ranking objective:
+
+`L = mean NLL(observed action, observed destination) + mean softplus(margin + NLL(correct action) - NLL(other action))`
+
+The ranking term asks whether, for **the same desired outcome**, the
+observed successful action scores above the verified alternative. It is not
+a generic embedding-similarity metric and does not fabricate the opposite
+action's result after the first experience. A matched supervised-only
+ablation uses the same pairs without the ranking term. False-label and
+no-gradient controls remain independent of authoritative memory.
+
+Read `action_pair_runs` and the `mean_pair_*` keys in the generated
+report for observed performance. The existing CI gate verifies executed
+feedback, weight updates, controls, and restart consistency. Passing the
+gate **does not certify decision improvement**; improvement must be measured
+against the matched supervision baseline across held-out entities and seeds.
+
+**Status:** Experimental implementation, not live-session cognition;
+action-conditioned transfer must be demonstrated empirically.
