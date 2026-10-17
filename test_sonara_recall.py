@@ -75,12 +75,22 @@ def test_recall():
         assert joint["bias:user_question"] < 0 and joint["bias:qwen_follow_up"] < 0
         assert hit(baseline_rank(store, "Jake liked what", 20 * day, joint), [old.id])
 
+        # An updated note: the tuner learns to push down a memory once a similar, newer one exists.
+        plan = store.add("dentist appointment Tuesday 9am", "user_note")
+        moved = store.add("dentist appointment moved Friday 3pm", "user_note")
+        plan.timestamp_epoch, moved.timestamp_epoch = 16 * day, 17 * day
+        update = [{"question": "when is my dentist appointment", "asked_epoch": 20 * day, "correct_ids": [moved.id]}]
+        assert baseline_rank(store, update[0]["question"], 20 * day, joint)[0] == plan
+        tuned = tune(store, update)
+        assert tuned["newer"] < 0 and baseline_rank(store, update[0]["question"], 20 * day, tuned)[0] == moved
+
         # Every method ranks from a bounded set: the top memories by cosine plus the newest.
         for i in range(70):
             store.add(f"filler note {i}", "user_note").timestamp_epoch = 16 * day + i
         pool = candidates(store, "what did Jake like", 20 * day)
         assert len(pool) <= POOL_COSINE + POOL_NEWEST and old in pool
-        assert all(store.memory.memories[m.id] in pool for m in store.before(20 * day)[-POOL_NEWEST:])
+        newest = sorted(store.before(20 * day), key=lambda m: m.timestamp_epoch)[-POOL_NEWEST:]
+        assert all(m in pool for m in newest)
 
         # The labeling pool unions each system's top 5 with the newest and records who proposed what.
         ranked = baseline_rank(store, "what did Jake like", 20 * day)

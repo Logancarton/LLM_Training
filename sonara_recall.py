@@ -31,9 +31,10 @@ from sonara_text_encoder import PretrainedTextEncoder
 CHAT_MODEL = "qwen2.5:1.5b-instruct"
 CHAT_ENDPOINT = "http://127.0.0.1:11434/api/chat"
 K = 5
-# Recency weight, half-life in days, and "bias:<source>" (default 0) per memory source.
+# Recency weight, half-life in days, "newer" (weight on newer_similar, default 0), and
+# "bias:<source>" (default 0) per memory source.
 DEFAULT_PARAMS = {"weight": 0.1, "half_life": 7.0}
-GRID = {"weight": (0.0, 0.05, 0.1, 0.2, 0.4), "half_life": (1.0, 7.0, 30.0)}
+GRID = {"weight": (0.0, 0.05, 0.1, 0.2, 0.4), "half_life": (1.0, 7.0, 30.0), "newer": (-0.4, -0.2, -0.1, 0.0)}
 BIAS_GRID = (-0.4, -0.2, -0.1, 0.0, 0.1)
 TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
 POOL_COSINE, POOL_NEWEST = 50, 10  # the bounded candidate set every method ranks from
@@ -138,14 +139,16 @@ def candidates(store: Store, question: str, asked_epoch: float) -> List[Memory]:
 
 def baseline_scores(store: Store, question: str, asked_epoch: float,
                     params: Dict[str, float] = DEFAULT_PARAMS) -> Tuple[List[Memory], torch.Tensor]:
-    """Fixed baseline: cosine similarity + weight * recency (relative to ask time) + source bias."""
+    """Fixed baseline: cosine similarity + weight * recency (relative to ask time) + newer * the
+    memory's similarity to a newer memory (Sonara's newer_similar input) + source bias."""
     mems = candidates(store, question, asked_epoch)
     if not mems:
         return [], torch.zeros(0)
     age_days = torch.tensor([(asked_epoch - m.timestamp_epoch) / 86400 for m in mems])
     recency = torch.exp(-math.log(2) * age_days / params["half_life"])
     bias = torch.tensor([params.get("bias:" + m.source, 0.0) for m in mems])
-    return mems, store.similarities(question, mems) + params["weight"] * recency + bias
+    newer = params.get("newer", 0.0) * store.newer_similar(mems, asked_epoch)
+    return mems, store.similarities(question, mems) + params["weight"] * recency + newer + bias
 
 
 def rank_by(mems: Sequence[Memory], scores: torch.Tensor) -> List[Memory]:
@@ -163,7 +166,7 @@ def hit(ranked: Sequence[Memory], correct_ids: Sequence[str], k: int = K) -> boo
 
 def tune(store: Store, train: List[Dict]) -> Dict[str, float]:
     """Try every combination of the baseline's settings on train questions only and keep the
-    one with the most hits; ties keep the defaults. Each question's cosines, ages and sources
+    one with the most top-1 hits (the target), then the most recall@5 hits; ties keep the defaults. Each question's cosines, ages and sources
     are computed once, then all combinations are scored together."""
     params = dict(DEFAULT_PARAMS)
     if not train:
@@ -180,9 +183,10 @@ def tune(store: Store, train: List[Dict]) -> Dict[str, float]:
         age_days = torch.tensor([(q["asked_epoch"] - m.timestamp_epoch) / 86400 for m in mems])
         src = torch.tensor([sources.index(m.source) for m in mems])
         recency = torch.exp(-math.log(2) * age_days[None, :] / combos[:, 1:2])
-        scores = store.similarities(q["question"], mems) + combos[:, 0:1] * recency + combos[:, 2:][:, src]
+        newer = combos[:, 2:3] * store.newer_similar(mems, q["asked_epoch"])[None, :]
+        scores = store.similarities(q["question"], mems) + combos[:, 0:1] * recency + newer + combos[:, 3:][:, src]
         above = (scores > scores[:, correct].max(dim=1).values[:, None]).sum(dim=1)
-        hits += (above < K).float()
+        hits += (above == 0).float() * (len(train) + 1) + (above < K).float()
     default = [params.get(k, 0.0) for k in keys]
     best = int((combos == torch.tensor(default, dtype=torch.float64)).all(dim=1).nonzero()[0])
     if hits.max() > hits[best]:
