@@ -21,6 +21,7 @@ on:
       - experiment_processing_efficiency.py
       - experiment_replay_budget.py
       - test_world_efficiency.py
+      - EXPERIMENT_PROCESSING_EFFICIENCY_REPORT.md
       - test_causal_loop.py
       - .github/workflows/experience-learning.yml
   pull_request:
@@ -43,6 +44,7 @@ on:
       - experiment_processing_efficiency.py
       - experiment_replay_budget.py
       - test_world_efficiency.py
+      - EXPERIMENT_PROCESSING_EFFICIENCY_REPORT.md
       - test_causal_loop.py
       - .github/workflows/experience-learning.yml
   workflow_dispatch:
