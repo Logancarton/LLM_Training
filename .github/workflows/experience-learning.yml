@@ -79,9 +79,9 @@ jobs:
       - name: Neural world model benchmark (3 seeds)
         run: |
           python experiment_world_learning.py --seeds 3 --steps 40 --output artifacts/world_learning_report.json
-      - name: One-experience causal transfer gate
+      - name: One- and two-experience causal transfer gate
         run: |
-          python LLM_Training.py --mode experience --experience-seeds 2 --experience-dim 16 --experience-heldout 2 --device cpu --data-dir "$RUNNER_TEMP/causal_learning" --experience-output artifacts/causal_learning_report.json
+          python LLM_Training.py --mode experience --experience-seeds 3 --experience-dim 24 --experience-heldout 3 --device cpu --data-dir "$RUNNER_TEMP/causal_learning" --experience-output artifacts/causal_learning_report.json
           python - <<'PY'
           import json
           r = json.load(open('artifacts/causal_learning_report.json'))
