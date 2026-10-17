@@ -29,19 +29,26 @@ SYSTEMS COMPARED
     world_model_ablated  same, with the hand-computed progression features zeroed
                          (event_temporal_features, event_local_features, global_rel_features)
     shuffled_time        world model trained and tested with event order shuffled
+    learned              Experiment 3: learned vocabulary + entity gate, no hand-computed
+                         features (state-based event scoring instead), extra TRAINING
+                         phrasings, cosine learning-rate decay
+    learned_original_phrasing, learned_with_features, structural_extended_phrasing
+                         the same with one change removed or applied alone (see NEURAL_SYSTEMS)
 
 A result counts as learned event understanding only where the world model clearly beats
-the rule baseline AND survives the ablation.
+the rule baseline AND survives the ablation. Test stories use their own RNG and only the
+original phrasings, so every system and training variety is scored on identical tests.
 
 Usage:
-    python3 experiment_world_generalization.py --seeds 3 --steps 900 --workers 2 \
-        --output artifacts/world_generalization_report.json
+    python3 experiment_world_generalization.py --seeds 3 --steps 900 --workers 7 \
+        --systems world_model,learned --output artifacts/world_generalization_v2_report.json
 """
 from __future__ import annotations
 
 import argparse
 import copy
 import json
+import math
 import random
 import re
 import time
@@ -140,11 +147,43 @@ QUESTIONS = {
         "train": ["where will the {o} be if {a} moves it into the {p}?"],
         "heldout": ["if {a} takes the {o} to the {p}, where will it end up?"],
     },
-    "missing_info": {
-        "train": ["where is the {o}?", "who moved the {o} into the {p}?"],
-        "heldout": ["what room is the {o} in now?", "who brought the {o} to the {p}?"],
-    },
 }
+
+# Extra TRAINING-only phrasings for --variety extended (recommendation 3: train on more
+# phrasing variety than is tested). They add new verbs and word orders but deliberately
+# avoid the held-out constructions (passive "was taken ... by", place-first or
+# clause-first sentences, "put/set/dropped off", "room", "now", "start out", "brought").
+EXTRA_TRAIN = {
+    "move": [
+        "{a} stashed the {o} inside the {p}.",
+        "{a} quickly hauled the {o} over to the {p}.",
+        "{a} slid the {o} across into the {p} after lunch.",
+        "{a} returned the {o} to the {p}.",
+    ],
+    "distract": [
+        "{a} pointed at the {o}.",
+        "{a} nearly moved the {o} to the {p} but changed plans.",
+    ],
+    "noise": ["{a} read a book.", "{a} made some tea."],
+    "correction": ["correction: the move of the {o} to the {pbad} never happened; it remained in the {pgood}."],
+    "current_state": ["where can the {o} be found?", "which place holds the {o}?"],
+    "previous_state_time": ["where was the {o} located before {t}?"],
+    "previous_state_notime": ["what place was the {o} in before it went to the {p}?"],
+    "first_location": ["where was the {o} at the beginning?"],
+    "actor": ["which person moved the {o} into the {p}?"],
+    "object_identity": ["what object did {a} put in the {p}?"],
+    "event_order": ["did {t1} come before {t2}?"],
+    "membership": ["is the {o} located in the {p}?"],
+    "state_transition": ["where would the {o} be after {a} moves it into the {p}?"],
+}
+
+VARIETIES = ("original", "extended")
+
+
+def _tmpl(table: Dict[str, List[str]], key: str, split: str, variety: str) -> List[str]:
+    """Templates for one split; extended variety adds EXTRA_TRAIN phrasings to TRAIN only."""
+    extra = EXTRA_TRAIN.get(key, []) if (split == "train" and variety == "extended") else []
+    return table[split] + extra
 
 
 @dataclass
@@ -177,6 +216,7 @@ def generate_story(
     event_split: str,
     query_split: str,
     length_scale: int = 1,
+    variety: str = "original",
 ) -> Story:
     n_obj = rng.choice([2, 3])
     objs = rng.sample(objects_pool, n_obj)
@@ -222,20 +262,20 @@ def generate_story(
             choices = [p for p in places if p != current[o]]
             p = rng.choice(choices)
             a = rng.choice(actors)
-            t = emit(rng.choice(MOVE[event_split]).format(a=a, o=o, p=p))
+            t = emit(rng.choice(_tmpl(MOVE, "move", event_split, variety)).format(a=a, o=o, p=p))
             history[o].append({"time": t, "place": p, "actor": a, "idx": len(events) - 1, "corrected": False})
             current[o] = p
         elif kind == "distract":
             a = rng.choice(actors)
             p = rng.choice([q for q in places if q != current[o]])
-            emit(rng.choice(DISTRACT[event_split]).format(a=a, o=o, p=p))
+            emit(rng.choice(_tmpl(DISTRACT, "distract", event_split, variety)).format(a=a, o=o, p=p))
         else:
-            emit(rng.choice(NOISE[event_split]).format(a=rng.choice(actors)))
+            emit(rng.choice(_tmpl(NOISE, "noise", event_split, variety)).format(a=rng.choice(actors)))
 
     if corrected_obj is not None and len(history[corrected_obj]) >= 2:
         o = corrected_obj
         last, prev = history[o][-1], history[o][-2]
-        emit(rng.choice(CORRECTION[event_split]).format(a=last["actor"], o=o, pbad=last["place"], pgood=prev["place"]))
+        emit(rng.choice(_tmpl(CORRECTION, "correction", event_split, variety)).format(a=last["actor"], o=o, pbad=last["place"], pgood=prev["place"]))
         last["corrected"] = True
         current[o] = prev["place"]
     else:
@@ -244,7 +284,7 @@ def generate_story(
     true_hist = {o: [h for h in history[o] if not h["corrected"]] for o in objs}
 
     def qt(cat: str) -> str:
-        return rng.choice(QUESTIONS[cat][query_split])
+        return rng.choice(_tmpl(QUESTIONS[cat], cat, query_split, variety))
 
     qs: List[Q] = []
     for o in objs:
@@ -297,19 +337,27 @@ def generate_story(
         qs.append(Q(qt("state_transition").format(o=o, a=rng.choice(actors), p=p), p, "state_transition"))
     # missing info: object not in story, or a move that never happened
     if rng.random() < 0.5:
-        qs.append(Q(QUESTIONS["missing_info"][query_split][0].format(o=absent_obj), "unknown", "missing_info"))
+        qs.append(Q(qt("current_state").format(o=absent_obj), "unknown", "missing_info"))
     else:
         o = rng.choice(objs)
         never = [p for p in places if all(h["place"] != p for h in history[o])]
         if never:
-            qs.append(Q(QUESTIONS["missing_info"][query_split][1].format(o=o, p=rng.choice(never)), "unknown", "missing_info"))
+            qs.append(Q(qt("actor").format(o=o, p=rng.choice(never)), "unknown", "missing_info"))
 
     return Story(events=events, questions=qs, meta={"corrected": corrected_obj is not None})
 
 
-def build_splits(seed: int, n_train: int, n_test: int) -> Tuple[List[Story], Dict[str, List[Story]]]:
+def build_splits(
+    seed: int, n_train: int, n_test: int, variety: str = "original",
+) -> Tuple[List[Story], Dict[str, List[Story]]]:
+    """Test stories come from their own RNG and never use EXTRA_TRAIN phrasings, so
+    every system and training variety is scored on the identical test set."""
     rng = random.Random(seed)
-    train = [generate_story(rng, TRAIN_ACTORS, TRAIN_OBJECTS, TRAIN_PLACES, "train", "train") for _ in range(n_train)]
+    train = [
+        generate_story(rng, TRAIN_ACTORS, TRAIN_OBJECTS, TRAIN_PLACES, "train", "train", variety=variety)
+        for _ in range(n_train)
+    ]
+    rng = random.Random(seed + 10_000)
     tests = {
         "A_new_entities": [generate_story(rng, TEST_ACTORS, TEST_OBJECTS, TEST_PLACES, "train", "train") for _ in range(n_test)],
         "B_new_event_phrasing": [generate_story(rng, TEST_ACTORS, TEST_OBJECTS, TEST_PLACES, "heldout", "train") for _ in range(n_test)],
@@ -491,18 +539,23 @@ def train_world_model(
     train: List[Story],
     steps: int,
     seed: int,
-    ablate: bool,
-    shuffle_time: bool,
+    system: Dict,
     val: Optional[List[Story]] = None,
     eval_every: int = 150,
 ) -> Tuple[SonaraWorldModel, Dict]:
     """Train with the model's own learn_step (AdamW + replay). Training is not monotonic,
     so when a validation set is given (training entities and phrasings, never test data)
-    the best checkpoint by validation accuracy is kept."""
+    the best checkpoint by validation accuracy is kept. With lr_decay the learning rate
+    follows a cosine from 0.002 down to 0.0002 (recommendation 4)."""
     torch.manual_seed(seed)
-    wm = SonaraWorldModel(device="cpu", dim=64, lr=0.002)
-    if ablate:
+    base_lr = 0.002
+    wm = SonaraWorldModel(
+        device="cpu", dim=64, lr=base_lr,
+        lexicon=system["lexicon"], engineered_features=system["features"],
+    )
+    if system["zero_features"]:
         ablate_engineered_features(wm)
+    shuffle_time = system["shuffle"]
     rng = random.Random(seed + 7)
     by_cat: Dict[str, List[Tuple[List[str], str, str]]] = defaultdict(list)
     for s in train:
@@ -519,6 +572,10 @@ def train_world_model(
     best_acc, best_state, best_step = -1.0, None, 0
     t0 = time.monotonic()
     for step in range(1, steps + 1):
+        if system["lr_decay"]:
+            lr = base_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * (step - 1) / steps)))
+            for group in wm.optimizer.param_groups:
+                group["lr"] = lr
         pool = by_cat[cats[(step - 1) % len(cats)]]
         ev, q, tgt = pool[((step - 1) // len(cats)) % len(pool)]
         losses.append(wm.learn_step(ev, q, tgt)["loss"])
@@ -557,28 +614,44 @@ def model_fn(wm: SonaraWorldModel, shuffle_seed: Optional[int] = None) -> Callab
 # 5. DRIVER
 # =====================================================================
 
+def _system(lexicon="structural", features=True, zero_features=False,
+            variety="original", lr_decay=False, shuffle=False) -> Dict:
+    return {"lexicon": lexicon, "features": features, "zero_features": zero_features,
+            "variety": variety, "lr_decay": lr_decay, "shuffle": shuffle}
+
+
 NEURAL_SYSTEMS = {
-    "world_model": (False, False),
-    "world_model_ablated": (True, False),
-    "shuffled_time": (False, True),
+    # Experiment 2 designs (fixed STRUCTURAL_WORDS vocabulary, original training phrasings).
+    "world_model": _system(),
+    "world_model_ablated": _system(zero_features=True),
+    "shuffled_time": _system(shuffle=True),
+    # Experiment 3: the four recommended fixes together, and with one fix removed at a time.
+    "learned": _system(lexicon="learned", features=False, variety="extended", lr_decay=True),
+    "learned_original_phrasing": _system(lexicon="learned", features=False, lr_decay=True),
+    "learned_with_features": _system(lexicon="learned", features=True, variety="extended", lr_decay=True),
+    "structural_extended_phrasing": _system(variety="extended", lr_decay=True),
 }
+DEFAULT_SYSTEMS = ("world_model", "learned", "structural_extended_phrasing")
 
 
-def build_val(seed: int, n: int = 30) -> List[Story]:
+def build_val(seed: int, variety: str = "original", n: int = 30) -> List[Story]:
     """Validation stories from the TRAINING distribution (training entities and phrasings)."""
     rng = random.Random(seed + 555)
-    return [generate_story(rng, TRAIN_ACTORS, TRAIN_OBJECTS, TRAIN_PLACES, "train", "train") for _ in range(n)]
+    return [
+        generate_story(rng, TRAIN_ACTORS, TRAIN_OBJECTS, TRAIN_PLACES, "train", "train", variety=variety)
+        for _ in range(n)
+    ]
 
 
 def run_neural_job(job: Tuple[int, str, int, int, int]) -> Tuple[int, str, Dict]:
     seed, name, steps, n_train, n_test = job
     torch.set_num_threads(1)
-    train, tests = build_splits(seed, n_train, n_test)
-    ablate, shuf = NEURAL_SYSTEMS[name]
-    wm, info = train_world_model(train, steps, seed, ablate=ablate, shuffle_time=shuf, val=build_val(seed))
-    fn = model_fn(wm, shuffle_seed=seed + 99 if shuf else None)
-    entry: Dict = {"training": info, "train": score(fn, train[:60])}
-    conds = tests if name != "shuffled_time" else {"A_new_entities": tests["A_new_entities"]}
+    system = NEURAL_SYSTEMS[name]
+    train, tests = build_splits(seed, n_train, n_test, variety=system["variety"])
+    wm, info = train_world_model(train, steps, seed, system, val=build_val(seed, system["variety"]))
+    fn = model_fn(wm, shuffle_seed=seed + 99 if system["shuffle"] else None)
+    entry: Dict = {"system": system, "training": info, "train": score(fn, train[:60])}
+    conds = tests if not system["shuffle"] else {"A_new_entities": tests["A_new_entities"]}
     for k, v in conds.items():
         entry[k] = score(fn, v)
     print(f"  seed {seed}: {name} done ({info['train_seconds']}s, best step {info['selected_step']}) "
@@ -623,6 +696,8 @@ def main() -> None:
     ap.add_argument("--train-stories", type=int, default=240)
     ap.add_argument("--test-stories", type=int, default=60)
     ap.add_argument("--workers", type=int, default=1, help="parallel training processes")
+    ap.add_argument("--systems", type=str, default=",".join(DEFAULT_SYSTEMS),
+                    help="comma-separated neural systems: " + ", ".join(NEURAL_SYSTEMS))
     ap.add_argument("--output", type=str, default="artifacts/world_generalization_report.json")
     ap.add_argument("--show-examples", action="store_true", help="print one story per condition and exit")
     ap.add_argument("--score-experiment1", action="store_true", help="score the rule baseline on Experiment 1 held-out data and exit")
@@ -650,13 +725,17 @@ def main() -> None:
                 print(f"   Q [{q.category}] {q.question} -> {q.target}")
         return
 
+    systems = [name.strip() for name in args.systems.split(",") if name.strip()]
+    unknown = [name for name in systems if name not in NEURAL_SYSTEMS]
+    if unknown:
+        ap.error(f"unknown systems: {unknown}")
     seeds = [1000 + i for i in range(args.seeds)]
     runs = []
     for s in seeds:
         train, _ = build_splits(s, args.train_stories, args.test_stories)
         runs.append({"seed": s, "n_train_questions": sum(len(x.questions) for x in train),
                      "systems": run_baselines(s, args.train_stories, args.test_stories)})
-    jobs = [(s, name, args.steps, args.train_stories, args.test_stories) for s in seeds for name in NEURAL_SYSTEMS]
+    jobs = [(s, name, args.steps, args.train_stories, args.test_stories) for s in seeds for name in systems]
     by_seed = {r["seed"]: r for r in runs}
     partial = Path(args.output).with_suffix(".partial.json")
     partial.parent.mkdir(parents=True, exist_ok=True)
@@ -676,7 +755,7 @@ def main() -> None:
         for j in jobs:
             record(run_neural_job(j))
     report = {
-        "benchmark": "world_generalization_v1",
+        "benchmark": "world_generalization_v2",
         "config": vars(args),
         "summary": summarize(runs),
         "runs": runs,

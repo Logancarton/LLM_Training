@@ -137,5 +137,69 @@ class SonaraWorldModelTests(unittest.TestCase):
             self.assertTrue(torch.equal(b, a))
 
 
+class LearnedLexiconTests(unittest.TestCase):
+    """Opt-in design: learned vocabulary and entity gate, no hand-computed features."""
+
+    EVENTS = [
+        "12:15 Jake carried the ball into the yard.",
+        "12:16 Jake moved the ball into the pond.",
+    ]
+
+    def setUp(self):
+        torch.manual_seed(7)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp_dir.name) / "learned.pt"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def make(self, **kw):
+        return SonaraWorldModel(device="cpu", dim=32, lr=0.01, lexicon="learned",
+                                engineered_features=False, **kw)
+
+    def test_default_owner_keeps_original_design(self):
+        wm = SonaraWorldModel(device="cpu", dim=32)
+        self.assertEqual(wm.model.lexicon, "structural")
+        self.assertTrue(wm.model.engineered_features)
+        self.assertIsNone(wm.model.reasoner.state_feat_proj)
+        self.assertNotIn("embedding.word_trained", wm.model.state_dict())
+
+    def test_learns_and_gates_receive_gradient(self):
+        wm = self.make()
+        losses = [wm.learn_step(self.EVENTS, "where is the ball?", "pond")["loss"] for _ in range(15)]
+        self.assertLess(losses[-1], losses[0])
+        wm.model.train()
+        loss = wm.model.compute_loss(self.EVENTS, "where is the ball?", "pond", wm.word_to_id, wm.device)
+        loss.backward()
+        gate_grad = sum(float(p.grad.abs().sum()) for p in wm.model.embedding.entity_gate.parameters()
+                        if p.grad is not None)
+        self.assertGreater(gate_grad, 0.0)
+        self.assertIsNotNone(wm.model.reasoner.state_feat_proj[0].weight.grad)
+
+    def test_untrained_words_fall_back_to_unknown_embedding(self):
+        """Registering a word (e.g. via observe) must not expose its random untrained row."""
+        wm = self.make()
+        wm.learn_step(self.EVENTS, "where is the ball?", "pond")
+        emb = wm.model.embedding
+        emb.eval()
+        wm.register_vocabulary(["zebra"])
+        zebra_id = wm.word_to_id["zebra"]
+        self.assertFalse(bool(emb.word_trained[zebra_id]))
+        ids, _ = emb._effective_ids(["zebra", "ball"], [zebra_id, wm.word_to_id["ball"]])
+        self.assertEqual(ids, [CLOSED_VOCABULARY.index("<unk>"), wm.word_to_id["ball"]])
+
+    def test_checkpoint_round_trip_and_design_mismatch(self):
+        wm = self.make(checkpoint_path=self.path)
+        for _ in range(5):
+            wm.learn_step(self.EVENTS, "where is the ball?", "pond")
+        wm.save_checkpoint()
+        before = wm.predict("where is the ball?", events=self.EVENTS)
+        after = self.make(checkpoint_path=self.path).predict("where is the ball?", events=self.EVENTS)
+        self.assertEqual(before.answer, after.answer)
+        self.assertAlmostEqual(before.confidence, after.confidence, places=5)
+        with self.assertRaises(ValueError):
+            SonaraWorldModel(checkpoint_path=self.path, device="cpu", dim=32)
+
+
 if __name__ == "__main__":
     unittest.main()

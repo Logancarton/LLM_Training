@@ -111,7 +111,13 @@ class CharSubwordEmbedding(nn.Module):
     Ensures that unfamiliar entities (e.g. 'sophia', 'frisbee', 'attic')
     receive non-zero, morphologically distinct, and trainable representations.
     """
-    def __init__(self, vocab_size: int = 512, hash_buckets: int = 1024, dim: int = 64):
+    def __init__(
+        self,
+        vocab_size: int = 512,
+        hash_buckets: int = 1024,
+        dim: int = 64,
+        learned_lexicon: bool = False,
+    ):
         super().__init__()
         self.dim = dim
         self.vocab_size = vocab_size
@@ -124,6 +130,49 @@ class CharSubwordEmbedding(nn.Module):
         self._ngram_cache_capacity = 4096
         # Internal ablation switch: no learned weights or representational features change.
         self._vectorized_char_bags = True
+        # Learned lexicon: every word seen in training gets its own embedding, and
+        # whether a token acts as an entity (for identity matching) is a learned
+        # gate rather than membership in the fixed STRUCTURAL_WORDS list. Words
+        # never seen in a training step fall back to <unk> + character n-grams.
+        self.learned_lexicon = learned_lexicon
+        self._dropped_words: frozenset = frozenset()
+        if learned_lexicon:
+            self.register_buffer("word_trained", torch.zeros(vocab_size, dtype=torch.bool))
+            self.entity_gate = nn.Sequential(
+                nn.Linear(dim, dim // 2), nn.Tanh(), nn.Linear(dim // 2, 1)
+            )
+            # Start open (gate ~0.88) so identity matching works before training.
+            nn.init.constant_(self.entity_gate[-1].bias, 2.0)
+
+    def _effective_ids(self, token_strings: Sequence[str], word_ids: Sequence[int]) -> Tuple[List[int], List[float]]:
+        """Map tokens to the word-embedding row actually used, plus the char-feature scale."""
+        eff_ids: List[int] = []
+        scales: List[float] = []
+        if self.learned_lexicon:
+            if self.training:
+                for tok, wid in zip(token_strings, word_ids):
+                    if wid < self.vocab_size and tok not in self._dropped_words:
+                        self.word_trained[wid] = True
+            for tok, wid in zip(token_strings, word_ids):
+                usable = (
+                    wid < self.vocab_size and not tok.isdigit()
+                    and tok not in self._dropped_words and bool(self.word_trained[wid])
+                )
+                eff_ids.append(wid if usable else UNK_ID)
+                scales.append(1.0)
+            return eff_ids, scales
+        for tok, wid in zip(token_strings, word_ids):
+            if wid >= self.vocab_size or tok.isdigit() or tok.lower() not in STRUCTURAL_WORDS:
+                eff_ids.append(UNK_ID)
+                scales.append(0.1)
+            else:
+                eff_ids.append(wid)
+                scales.append(1.0)
+        return eff_ids, scales
+
+    def entity_gates(self, token_strings: Sequence[str], word_ids: Sequence[int], device: torch.device) -> torch.Tensor:
+        """Learned (L,) probability that each token names an entity, place or time."""
+        return torch.sigmoid(self.entity_gate(self.forward(token_strings, word_ids, device))).squeeze(-1)
 
     def _hash_ngram(self, ngram: str) -> int:
         h = int(hashlib.md5(ngram.encode("utf-8")).hexdigest()[:8], 16)
@@ -168,16 +217,27 @@ class CharSubwordEmbedding(nn.Module):
         char_vecs = [flat_vecs[s:e].mean(dim=0) for s, e in offsets]
         return torch.stack(char_vecs, dim=0)
 
-    def embed_identity(self, token_strings: Sequence[str], device: torch.device) -> torch.Tensor:
+    def embed_identity(
+        self, token_strings: Sequence[str], device: torch.device,
+        gates: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Compute L2-normalized morphological identity vectors for content tokens,
-        zeroing stopwords and structural syntax words so entity matching only binds
-        entities, objects, places, and timestamps.
+        zeroing stopwords and non-entity words so entity matching only binds
+        entities, objects, places, and timestamps. Non-entity words are those in
+        STRUCTURAL_WORDS, or, when learned `gates` are given, are down-weighted
+        by the learned entity gate instead.
         """
         if not token_strings:
             return torch.zeros(1, self.dim, device=device)
         char_vecs = self.embed_char_only(token_strings, device)
         normed = F.normalize(char_vecs, p=2, dim=-1)
+        if gates is not None:
+            content = torch.tensor(
+                [1.0 if is_content_token(t) else 0.0 for t in token_strings],
+                dtype=torch.float32, device=device,
+            )
+            return normed * (content * gates).unsqueeze(-1)
         mask = torch.tensor(
             [1.0 if (is_content_token(t) and t.lower() not in STRUCTURAL_WORDS) else 0.0 for t in token_strings],
             dtype=torch.float32,
@@ -186,32 +246,13 @@ class CharSubwordEmbedding(nn.Module):
         return normed * mask
 
     def embed_token(self, token: str, word_id: int, device: torch.device) -> torch.Tensor:
-        t_low = token.lower()
-        is_struct = t_low in STRUCTURAL_WORDS
-        eff_id = UNK_ID if (word_id >= self.vocab_size or token.isdigit() or not is_struct) else word_id
-        w_id = torch.tensor([eff_id], device=device)
-        w_vec = self.word_embeddings(w_id).squeeze(0)  # (dim,)
-        bucket_ids = torch.tensor(self._get_buckets(token), dtype=torch.long, device=device)
-        char_vec = self.hash_embeddings(bucket_ids).mean(dim=0)  # (dim,)
-        scale = 1.0 if is_struct else 0.1
-        combined = torch.cat([w_vec, char_vec * scale], dim=-1)
-        return self.norm(self.projection(combined))
+        return self.forward([token], [word_id], device).squeeze(0)
 
     def forward(self, token_strings: Sequence[str], word_ids: Sequence[int], device: torch.device) -> torch.Tensor:
         """Embed a sequence of tokens into a (seq_len, dim) tensor."""
         if not token_strings:
             return torch.zeros(1, self.dim, device=device)
-        eff_ids = []
-        scales = []
-        for tok, wid in zip(token_strings, word_ids):
-            t_low = tok.lower()
-            is_struct = t_low in STRUCTURAL_WORDS
-            if wid >= self.vocab_size or tok.isdigit() or not is_struct:
-                eff_ids.append(UNK_ID)
-                scales.append(0.1)
-            else:
-                eff_ids.append(wid)
-                scales.append(1.0)
+        eff_ids, scales = self._effective_ids(token_strings, word_ids)
         w_tensor = torch.tensor(eff_ids, dtype=torch.long, device=device)
         w_vecs = self.word_embeddings(w_tensor)  # (L, dim)
         char_vecs = self.embed_char_only(token_strings, device)  # (L, dim)
@@ -371,9 +412,15 @@ class WorldReasoningCore(nn.Module):
     Cross-attends over past events and temporal states given a query,
     then predicts relational state transitions.
     """
-    def __init__(self, dim: int = 64):
+    def __init__(self, dim: int = 64, state_scoring: bool = False):
         super().__init__()
         self.dim = dim
+        # Learned replacement for the hand-computed progression features: the
+        # event scorer reads each event's recurrent world state instead.
+        self.state_feat_proj = (
+            nn.Sequential(nn.Linear(dim, dim), nn.Tanh(), nn.Linear(dim, dim))
+            if state_scoring else None
+        )
         self.q_proj = nn.Linear(dim, dim, bias=False)
         self.k_proj = nn.Linear(dim, dim, bias=False)
         self.v_proj = nn.Linear(dim, dim, bias=False)
@@ -430,6 +477,8 @@ class WorldReasoningCore(nn.Module):
             event_temporal_features = torch.zeros(T, 6, device=device)
 
         t_feat_vec = self.temp_feat_mlp(event_temporal_features)  # (T, dim)
+        if self.state_feat_proj is not None:
+            t_feat_vec = t_feat_vec + self.state_feat_proj(state_vecs)
         q_exp = query_vec.unsqueeze(0).expand(T, -1)
         mlp_scores = self.event_scorer(
             torch.cat([q_exp, t_feat_vec, q_exp * t_feat_vec], dim=-1)
@@ -671,14 +720,32 @@ class NeuralWorldModel(nn.Module):
         vocab_size: int = 512,
         hash_buckets: int = 1024,
         max_events: int = 64,
+        lexicon: str = "structural",
+        engineered_features: bool = True,
+        word_dropout: float = 0.2,
     ):
+        """lexicon="structural" keeps the original fixed STRUCTURAL_WORDS vocabulary;
+        "learned" gives every training word an embedding and learns the entity gate.
+        engineered_features=False drops the hand-computed progression features
+        (latest/earliest mention, before-anchor, left/right tau) and lets the
+        reasoner score events from recurrent world states instead."""
         super().__init__()
+        if lexicon not in ("structural", "learned"):
+            raise ValueError(f"Unknown lexicon: {lexicon}")
         self.dim = dim
-        self.embedding = CharSubwordEmbedding(vocab_size=vocab_size, hash_buckets=hash_buckets, dim=dim)
+        self.lexicon = lexicon
+        self.engineered_features = engineered_features
+        # Per-episode probability of hiding a known word behind <unk> during
+        # training, so the model also learns to read words it has never seen.
+        self.word_dropout = word_dropout if lexicon == "learned" else 0.0
+        self.embedding = CharSubwordEmbedding(
+            vocab_size=vocab_size, hash_buckets=hash_buckets, dim=dim,
+            learned_lexicon=(lexicon == "learned"),
+        )
         self.temporal_encoding = TemporalEncoding(dim=dim, max_steps=max_events)
         self.event_encoder = EventEncoder(self.embedding, dim=dim)
         self.tracker = WorldStateTracker(dim=dim)
-        self.reasoner = WorldReasoningCore(dim=dim)
+        self.reasoner = WorldReasoningCore(dim=dim, state_scoring=not engineered_features)
         self.head = PointerGeneratorHead(dim=dim)
         self.sparse_selector = LearnedSparseActivation(dim=dim)
         # Cache only weight-independent tokenization and candidate positions,
@@ -739,6 +806,17 @@ class NeuralWorldModel(nn.Module):
         query_tokens = tokenize(query)
         tokenized_events, candidates, candidate_indices = self._prepare_events(events)
         cand_to_idx = {c: idx for idx, c in enumerate(candidates)}
+        learned = self.lexicon == "learned"
+        if learned and self.training and self.word_dropout > 0:
+            # One decision per word for the whole episode, so a hidden name is
+            # hidden consistently in every event and in the question.
+            words = sorted({t for toks in tokenized_events for t in toks} | set(query_tokens))
+            draws = torch.rand(len(words)).tolist()
+            self.embedding._dropped_words = frozenset(
+                w for w, d in zip(words, draws) if d < self.word_dropout
+            )
+        else:
+            self.embedding._dropped_words = frozenset()
 
         if not events:
             q_vec = self.event_encoder(query_tokens, word_to_id, device)
@@ -763,8 +841,21 @@ class NeuralWorldModel(nn.Module):
         t_vecs = self.temporal_encoding(step_indices)  # (T, dim)
 
         # 1. Compute morphological identity embeddings for query and events
-        q_id_vecs = self.embedding.embed_identity(query_tokens, device)  # (L_q, dim)
-        ev_id_vecs_list = [self.embedding.embed_identity(ev_toks, device) for ev_toks in tokenized_events]
+        if learned:
+            def ids(toks: List[str]) -> List[int]:
+                return [word_to_id.get(t, UNK_ID) for t in toks]
+            q_gates = self.embedding.entity_gates(query_tokens, ids(query_tokens), device)
+            ev_gates_list = [
+                self.embedding.entity_gates(ev_toks, ids(ev_toks), device) for ev_toks in tokenized_events
+            ]
+            q_id_vecs = self.embedding.embed_identity(query_tokens, device, gates=q_gates)
+            ev_id_vecs_list = [
+                self.embedding.embed_identity(ev_toks, device, gates=g)
+                for ev_toks, g in zip(tokenized_events, ev_gates_list)
+            ]
+        else:
+            q_id_vecs = self.embedding.embed_identity(query_tokens, device)  # (L_q, dim)
+            ev_id_vecs_list = [self.embedding.embed_identity(ev_toks, device) for ev_toks in tokenized_events]
 
         # 2. Compute smooth differentiable identity similarity matrices M_t: (L_t, L_q)
         sim_matrices: List[torch.Tensor] = []
@@ -829,11 +920,14 @@ class NeuralWorldModel(nn.Module):
             s_max = M_t.max(dim=-1).values  # (L_t,)
             spec_weights = M_t * spec_tj[t].unsqueeze(0)  # (L_t, L_q)
             s_uniq = spec_weights.max(dim=-1).values  # (L_t,)
-            is_struct_or_digit = torch.tensor(
-                [1.0 if (tok.lower() in STRUCTURAL_WORDS or tok.isdigit()) else 0.0 for tok in ev_toks],
-                dtype=torch.float32,
-                device=device,
-            )
+            if learned:
+                is_struct_or_digit = 1.0 - ev_gates_list[t]
+            else:
+                is_struct_or_digit = torch.tensor(
+                    [1.0 if (tok.lower() in STRUCTURAL_WORDS or tok.isdigit()) else 0.0 for tok in ev_toks],
+                    dtype=torch.float32,
+                    device=device,
+                )
             tok_pos_scalar = (
                 torch.linspace(0.0, 1.0, steps=len(ev_toks), device=device)
                 if len(ev_toks) > 1
@@ -843,7 +937,8 @@ class NeuralWorldModel(nn.Module):
 
             ent_positions = [
                 idx for idx, tok in enumerate(ev_toks)
-                if is_content_token(tok) and tok.lower() not in STRUCTURAL_WORDS and not tok.isdigit()
+                if self.engineered_features
+                and is_content_token(tok) and tok.lower() not in STRUCTURAL_WORDS and not tok.isdigit()
             ]
             if ent_positions:
                 last_ent_match = s_max[ent_positions[-1]]
@@ -894,6 +989,9 @@ class NeuralWorldModel(nn.Module):
             )
         event_temporal_features = torch.stack(ev_temp_feats, dim=0)  # (T, 6)
         event_local_features = torch.stack(ev_local_feats, dim=0)    # (T, 5)
+        if not self.engineered_features:
+            event_temporal_features = None
+            event_local_features = None
 
         event_tensor = torch.stack(encoded_events, dim=0)  # (T, dim)
         state_tensor, final_state = self.tracker(event_tensor, event_local_features=event_local_features)
@@ -951,7 +1049,7 @@ class NeuralWorldModel(nn.Module):
             tau_right,
             delta_tau,
             final_end_entity_match,
-        ])
+        ]) if self.engineered_features else torch.zeros(6, device=device)
 
         return (
             candidates,
@@ -1157,6 +1255,8 @@ class SonaraWorldModel:
         device: str = "auto",
         dim: int = 64,
         lr: float = 0.002,
+        lexicon: str = "structural",
+        engineered_features: bool = True,
     ):
         self.device = self._select_device(device)
         self.dim = dim
@@ -1165,7 +1265,9 @@ class SonaraWorldModel:
 
         self.word_to_id: Dict[str, int] = dict(CLOSED_TO_ID)
         self.id_to_word: Dict[int, str] = dict(ID_TO_CLOSED)
-        self.model = NeuralWorldModel(dim=dim).to(self.device)
+        self.model = NeuralWorldModel(
+            dim=dim, lexicon=lexicon, engineered_features=engineered_features
+        ).to(self.device)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
 
         self.session_events: List[str] = []
@@ -1538,7 +1640,11 @@ class SonaraWorldModel:
         payload = {
             "version": 3,
             "sparse_training_updates": self._sparse_training_updates,
-            "architecture": {"dim": self.dim, "family": "temporal_hierarchical"},
+            "architecture": {
+                "dim": self.dim, "family": "temporal_hierarchical",
+                "lexicon": self.model.lexicon,
+                "engineered_features": self.model.engineered_features,
+            },
             "word_to_id": self.word_to_id,
             "id_to_word": self.id_to_word,
             "trained_examples_count": self.trained_examples_count,
@@ -1565,7 +1671,17 @@ class SonaraWorldModel:
         # Check first: a former model's layers can have different shapes even
         # when its checkpoint also claims version 1. Never partially mutate
         # a live owner or overwrite an incompatible identity-bearing model.
-        dims = payload.get("architecture", {}).get("dim")
+        arch = payload.get("architecture", {})
+        dims = arch.get("dim")
+        # Checkpoints written before these flags existed are the original design.
+        if (
+            arch.get("lexicon", "structural") != self.model.lexicon
+            or arch.get("engineered_features", True) != self.model.engineered_features
+        ):
+            raise ValueError(
+                "World-model checkpoint lexicon/feature design differs from this owner; "
+                "construct SonaraWorldModel with the matching lexicon and engineered_features"
+            )
         old_state = payload["state_dict"]
         current = self.model.state_dict()
         missing = set(current) - set(old_state)
