@@ -5,6 +5,8 @@
 **Scope:** 2 seeds (1000, 1001). The run was stopped before the third seed to save time; no seed was dropped based on its results.
 **Model under test:** `sonara_world_model.py` as of this date, unmodified.
 
+> **Correction (2026-10-17):** the rule script below hard-codes the held-out question wordings, so on condition C it knew the test questions in advance. With only the training wordings it scores 7.4% on C, and the trained model's 28% beats it. The C comparisons in this report overstate the rule script; B, A and D are unaffected. See `EXPERIMENT_WORLD_LEARNED_LEXICON_REPORT.md`.
+
 ## Verdict
 
 **Learned event understanding is not established.** On average the trained world model never beats a rule script that does no learning. Its accuracy falls to 28% when questions are reworded, and it loses another 6–14 points when the hand-computed features are switched off. The Experiment 1 result (100% held-out) came from the benchmark's design, not from the model's ability. The live default, where `/ask` answers `UNKNOWN`, remains the correct setting.

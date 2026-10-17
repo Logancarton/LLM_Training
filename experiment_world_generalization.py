@@ -180,13 +180,26 @@ EXTRA_TRAIN = {
     "state_transition": ["where would the {o} be after {a} moves it into the {p}?"],
 }
 
-VARIETIES = ("original", "extended")
+VARIETIES = ("original", "extended", "paraphrased")
+PARAPHRASE_FILE = Path(__file__).with_name("paraphrased_templates.json")
+_paraphrased: Optional[Dict[str, List[str]]] = None
+
+
+def _paraphrased_templates() -> Dict[str, List[str]]:
+    """LLM-reworded, meaning-checked TRAINING templates (see generate_paraphrases.py)."""
+    global _paraphrased
+    if _paraphrased is None:
+        _paraphrased = json.loads(PARAPHRASE_FILE.read_text())["templates"]
+    return _paraphrased
 
 
 def _tmpl(table: Dict[str, List[str]], key: str, split: str, variety: str) -> List[str]:
-    """Templates for one split; extended variety adds EXTRA_TRAIN phrasings to TRAIN only."""
-    extra = EXTRA_TRAIN.get(key, []) if (split == "train" and variety == "extended") else []
-    return table[split] + extra
+    """Templates for one split. Extra varieties add phrasings to TRAIN only:
+    "extended" the hand-written EXTRA_TRAIN, "paraphrased" the LLM rewordings."""
+    if split != "train" or variety == "original":
+        return table[split]
+    extra = EXTRA_TRAIN if variety == "extended" else _paraphrased_templates()
+    return table[split] + extra.get(key, [])
 
 
 @dataclass
@@ -383,10 +396,21 @@ def _last_word(event: str) -> str:
     return re.findall(r"[a-z]+", event.split(";")[-1].lower())[-1]
 
 
-def rule_answer(q: str, events: List[str]) -> str:
+def rule_answer(q: str, events: List[str], heldout_questions: bool = True) -> str:
     """Positional heuristics tuned to Experiment 1's template. No learning.
-    Understands BOTH question phrasings so it is only judged on reading events."""
+
+    heldout_questions=True (the Experiment 2 baseline) also hard-codes the HELD-OUT
+    question wordings, so on condition C it knows the test questions in advance and is
+    judged only on reading events. heldout_questions=False knows only the training
+    question wordings, i.e. what a script written from the training data could know;
+    that is the fair comparison for models on C."""
     q = q.lower()
+
+    def find(train_pat: str, heldout_pat: Optional[str] = None):
+        m = re.search(train_pat, q)
+        if m is None and heldout_questions and heldout_pat:
+            m = re.search(heldout_pat, q)
+        return m
 
     def mentions(o, evs):
         return [e for e in evs if re.search(rf"\b{o}\b", e.lower())]
@@ -398,17 +422,18 @@ def rule_answer(q: str, events: List[str]) -> str:
     def tmin(h, m):
         return int(h) * 60 + int(m)
 
-    m = re.search(r"(?:did|was) (\d+):(\d+) (?:happen before|earlier than) (\d+):(\d+)", q)
+    m = find(r"did (\d+):(\d+) happen before (\d+):(\d+)", r"was (\d+):(\d+) earlier than (\d+):(\d+)")
     if m:
         return "yes" if tmin(m[1], m[2]) < tmin(m[3], m[4]) else "no"
-    m = re.search(r"where was the (\w+) before (\d+):(\d+)", q) or re.search(r"before (\d+):(\d+), where was the (\w+)", q)
+    m = find(r"where was the (\w+) before (\d+):(\d+)", r"before (\d+):(\d+), where was the (\w+)")
     if m:
         if m.re.pattern.startswith("before"):
             o, t = m[3], tmin(m[1], m[2])
         else:
             o, t = m[1], tmin(m[2], m[3])
         return where(o, [e for e in events if _ts(e) < t])
-    m = re.search(r"where (?:was|had) the (\w+) (?:been )?before it (?:went to|reached) the (\w+)", q)
+    m = find(r"where was the (\w+) before it went to the (\w+)",
+             r"where had the (\w+) been before it reached the (\w+)")
     if m:
         o, p = m[1], m[2]
         ms = mentions(o, events)
@@ -416,33 +441,37 @@ def rule_answer(q: str, events: List[str]) -> str:
             if _last_word(e) == p and i > 0:
                 return _last_word(ms[i - 1])
         return "unknown"
-    m = re.search(r"where (?:was the (\w+) first|did the (\w+) start out)", q)
+    m = find(r"where was the (\w+) first", r"where did the (\w+) start out")
     if m:
-        ms = mentions(m[1] or m[2], events)
+        ms = mentions(m[1], events)
         return _last_word(ms[0]) if ms else "unknown"
-    m = re.search(r"where will the \w+ be if .* into the (\w+)", q) or re.search(r"if \w+ takes the \w+ to the (\w+)", q)
+    m = find(r"where will the \w+ be if .* into the (\w+)", r"if \w+ takes the \w+ to the (\w+)")
     if m:
         return m[1]
-    m = re.search(r"where is the (\w+)", q) or re.search(r"what room is the (\w+) in", q)
+    m = find(r"where is the (\w+)", r"what room is the (\w+) in")
     if m:
         return where(m[1], events)
-    m = re.search(r"who (?:moved|brought) the (\w+) (?:into|to) the (\w+)", q)
+    m = find(r"who moved the (\w+) into the (\w+)", r"who brought the (\w+) to the (\w+)")
     if m:
         for e in events:
             if m[1] in e and m[2] in e:
                 return re.findall(r"[a-z]+", e.lower())[0]
         return "unknown"
-    m = re.search(r"what did (\w+) put in the (\w+)", q) or re.search(r"which item did (\w+) leave in the (\w+)", q)
+    m = find(r"what did (\w+) put in the (\w+)", r"which item did (\w+) leave in the (\w+)")
     if m:
         for e in events:
             if m[1] in e and m[2] in e:
                 mm = re.search(r"the (\w+)", e)
                 return mm[1] if mm else "unknown"
         return "unknown"
-    m = re.search(r"is the (\w+) (?:currently )?in the (\w+)", q)
+    m = find(r"is the (\w+) in the (\w+)", r"is the (\w+) currently in the (\w+)")
     if m:
         return "yes" if where(m[1], events) == m[2] else "no"
     return "unknown"
+
+
+def rule_answer_train_wording(q: str, events: List[str]) -> str:
+    return rule_answer(q, events, heldout_questions=False)
 
 
 def experiment1_rule_answer(q: str, events: List[str]) -> str:
@@ -641,6 +670,9 @@ NEURAL_SYSTEMS = {
     # Experiment 4: the original design with only word/sentence reading swapped for a
     # frozen local Qwen embedding model (qwen3-embedding:0.6b via Ollama).
     "pretrained": _system(lexicon="pretrained"),
+    # Experiment 5: both designs trained on LLM-reworded training templates.
+    "world_model_paraphrased": _system(variety="paraphrased"),
+    "pretrained_paraphrased": _system(lexicon="pretrained", variety="paraphrased"),
 }
 DEFAULT_SYSTEMS = ("world_model", "learned", "structural_extended_phrasing")
 
@@ -697,6 +729,7 @@ def run_baselines(seed: int, n_train: int, n_test: int) -> Dict:
     maj = majority_fn(train)
     return {
         "rule_baseline": {"train": score(rule_answer, train), **{k: score(rule_answer, v) for k, v in tests.items()}},
+        "rule_baseline_train_wording": {k: score(rule_answer_train_wording, v) for k, v in tests.items()},
         "majority_baseline": {k: score(maj, v) for k, v in tests.items()},
     }
 
