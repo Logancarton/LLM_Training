@@ -1265,11 +1265,11 @@ class SonaraWorldModel:
         No distillation target is accepted merely because the full-context
         model predicted it. If removing an observation makes the verified
         outcome harder to explain, its measured loss increase is a training
-        target. Expensive ablations are deliberately capped at 12 events.
+        target. Expensive ablations are deliberately capped at 32 events.
         """
         if not question.strip() or not verified_answer.strip() or not 1 <= steps <= 16:
             raise ValueError("Nonempty verified example and 1..16 selector steps required")
-        if not 2 <= len(events) <= 12:
+        if not 2 <= len(events) <= 32:
             return {"trained": False, "reason": "teacher_ablation_limit"}
         target = verified_answer.lower().strip()
         if target not in CLOSED_TO_ID and target not in extract_content_candidates(events):
