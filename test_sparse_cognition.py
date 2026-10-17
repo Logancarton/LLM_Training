@@ -36,7 +36,8 @@ class LearnedSparseCognitionTests(unittest.TestCase):
     def test_verified_learning_reaches_live_ranker_and_preserves_originals(self):
         self.owner._learned_sparse_activation = True
         verified = self.owner.learn_step(
-            self.events[:3] + [self.events[-1]], self.question, "courtyard"
+            self.events[:3] + ["Verified: Mara put the blue ball in the observatory."],
+            self.question, "observatory"
         )
         self.assertTrue(verified["sparse_attention"]["trained"])
         self.assertGreater(verified["sparse_attention"]["parameter_delta"], 0)
