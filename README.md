@@ -309,4 +309,18 @@ All held-out tests are synthetic. PR #9/#10 still regress two-action goal
 selection relative to main; this branch must not merge or enable by default
 without preserving main's action-decision accuracy.
 
-See EXPERIMENT_LEARNED_SPARSE_REPORT.md for findings and limitations.
+The revised experiment first trains the 40-step temporal world model, then
+freezes all world weights and trains ONLY the existing sparse ranker using
+verified mistakes from disjoint training scenarios (including >12-event
+experiences). On 118 held-out synthetic short/long cases, full-context
+accuracy was 82.20%. Sparse accuracy increased from 55.93% to 77.97%
+after attention training, while fixed retrieval achieved 77.12%. The
+world-model weights and full-context predictions did not change. Sparse
+inference used 3.93 vs 12.54 events and 11.11 vs 23.94 mean CPU ms. **Only
+two verified feedback examples across three seeds actually trained
+attention**: this is an encouraging mechanism signal, not proof of general
+causal learning or robust recovery. The existing decision regression
+still blocks merging.
+
+See EXPERIMENT_LEARNED_SPARSE_REPORT.md for the exact run, denominators,
+results, and limitations.
