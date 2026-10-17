@@ -42,6 +42,8 @@ The last three are the "what past feedback said" part. They count only train-spl
 
 **Learning curve.** At each split, train on the first 25/50/75/100% of earlier train questions and score eval recall@5. "The gap grows with experience" means this curve rises while the baseline's stays flat.
 
+**No early verdict.** Sonara isn't expected to beat the baseline early on; improvement should be slow. Until there are about 150 eval questions, each run reports the curve (Sonara minus baseline recall@5 vs. number of train questions) and makes no success or failure call. A fixed feedback-bonus rule (memories marked useful for similar past questions get a bonus whose size is tuned on train) is reported next to it as a reference. It shows how much of any gain comes from storing feedback rather than learning from it, but it isn't a success gate.
+
 **Cost.** One matrix multiply over memories plus one over past questions, about 10 weights. Negligible next to one Qwen embedding.
 
 ## How it is measured (decided before building)
