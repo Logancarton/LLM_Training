@@ -76,3 +76,9 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Checks:** the incremental index equals the N x N version at three different seconds; saved-then-continued state equals a full replay bit for bit, and equals `run`'s final weights; a stale code hash forces a replay.
 - **Result:** synthetic test unchanged (later half recall@5: Sonara 71%, control 57%, baseline 57%; same final weights), as expected, because it has 7 memories and the bounded set only binds above 60. Correct memory in the candidate set: 13/13.
 - **Wrong answers:** same as Run 9; nothing in this change touches ranking below 60 memories. Whether the bounded set loses memories only experience would find is a question for real data; the coverage line will show it.
+
+## 2026-10-17 · Run 11: shadow-mode change 2 (Sonara ranks alongside the baseline in chat)
+
+- **Changed:** one change. In `chat` the baseline still picks the memories Qwen answers from; Sonara ranks the same bounded candidate set alongside it. Each question row now stores both full rankings (`rankings.baseline`, `rankings.sonara`). After a train-split question is logged, Sonara learns it at once (`load_learner`) and saves; eval-split questions are never learned. The labeling prompt now says a memory is marked useful for the question, true or not.
+- **Checks:** a scripted 8-question chat (Qwen stubbed) logs both rankings on every row; the saved state lists exactly the train question ids; a labeled eval question afterwards leaves the weights and state unchanged.
+- **Result:** no ranking change, so no new numbers. Real data is still 1 memory, 0 questions. Sonara's live ranking is not shown to the user and not used for answers; change 3 (union labeling pool) is what lets memories only Sonara finds be labeled.

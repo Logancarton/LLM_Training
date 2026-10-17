@@ -63,10 +63,12 @@ class Store:
 
     def add_question(self, question_id: str, question: str, asked_epoch: float,
                      correct_ids: List[str], candidate_ids: List[str],
-                     answer_ok: Optional[bool]) -> Dict:
+                     answer_ok: Optional[bool], rankings: Optional[Dict[str, List[str]]] = None) -> Dict:
         row = {"id": question_id, "split": split_for(question_id), "question": question,
                "asked_epoch": asked_epoch, "correct_ids": correct_ids,
                "candidate_ids": candidate_ids, "answer_ok": answer_ok}
+        if rankings:
+            row["rankings"] = rankings
         with self.questions_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
         return row
@@ -221,6 +223,10 @@ def ask_qwen(question: str, mems: Sequence[Memory]) -> Tuple[str, str]:
 
 
 def chat(store: Store) -> None:
+    """The baseline answers; Sonara ranks alongside it in shadow, and both full rankings are
+    logged. Sonara learns live only from train-split questions (load_learner skips eval)."""
+    from sonara import load_learner  # sonara.py owns learning; imported here to avoid a cycle
+    sonara = load_learner(store)
     print("Ask a question, or '/note <text>' to store a note. Empty line quits.")
     while True:
         line = input("\nyou> ").strip()
@@ -231,12 +237,15 @@ def chat(store: Store) -> None:
             print(f"[noted {mem.id}]")
             continue
         asked = time.time()
-        answer, follow_up = ask_qwen(line, baseline_rank(store, line, asked)[:K])
+        baseline = baseline_rank(store, line, asked)
+        history = [q for q in store.questions() if q["split"] == "train"]
+        shadow = sonara.rank(store, {"question": line, "asked_epoch": asked}, history)
+        answer, follow_up = ask_qwen(line, baseline[:K])
         print(f"\nqwen> {answer}\n\nqwen (follow-up)> {follow_up}\n")
         pool = label_pool(store, line, asked)
         for i, m in enumerate(pool, 1):
             print(f"  {i:2}. ({m.timestamp_human}) {m.content[:160]}")
-        picks = input("Useful memories (numbers or ids, Enter = none): ").split()
+        picks = input("Memories useful for this question, true or not (numbers or ids, Enter = none): ").split()
         correct = [pool[int(p) - 1].id if p.isdigit() else p for p in picks
                    if (p.isdigit() and 1 <= int(p) <= len(pool)) or p in store.memory.memories]
         ok = input("Answer correct? [y/n/Enter=skip]: ").strip().lower()
@@ -244,7 +253,10 @@ def chat(store: Store) -> None:
         store.add(answer, source="qwen_answer")
         store.add(follow_up, source="qwen_follow_up")
         row = store.add_question(q_mem.id, line, asked, correct, [m.id for m in pool],
-                                 {"y": True, "n": False}.get(ok))
+                                 {"y": True, "n": False}.get(ok),
+                                 {"baseline": [m.id for m in baseline], "sonara": [m.id for m in shadow]})
+        if row["split"] == "train":
+            sonara = load_learner(store)
         print(f"[logged {row['split']} question with {len(correct)} useful memories]")
 
 

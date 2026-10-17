@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from sonara import CLOCK, FEATURES, STATE_FILE, VOTE, clock_inputs, features, load_learner, run
-from sonara_recall import Store
+from sonara_recall import Store, split_for
 
 
 def test_clock():
@@ -104,6 +104,40 @@ def test_sonara():
     print("✓ sonara tests passed")
 
 
+def test_shadow_chat():
+    """chat logs both rankings, and Sonara learns live from train questions, never from eval."""
+    import builtins
+    import contextlib
+    import io
+    import sonara_recall
+    tmp = tempfile.mkdtemp()
+    real_input, real_ask = builtins.input, sonara_recall.ask_qwen
+    try:
+        store = Store(tmp, encoder=FakeEncoder())
+        for t in ("spare key under the blue flowerpot", "car parked on level 3", "bike in the shed"):
+            store.add(t, "user_note").timestamp_epoch = 0.0
+        sonara_recall.ask_qwen = lambda question, mems: ("an answer", "a follow-up")
+        replies = iter([x for i in range(8) for x in (f"where is the key {i}", "1 2", "")] + [""])
+        builtins.input = lambda prompt="": next(replies)
+        with contextlib.redirect_stdout(io.StringIO()):
+            sonara_recall.chat(store)
+        rows = store.questions()
+        assert len(rows) == 8 and {r["split"] for r in rows} == {"train", "eval"}
+        assert all(r["rankings"]["baseline"] and r["rankings"]["sonara"] for r in rows)
+        state = torch.load(store.dir / STATE_FILE)
+        assert state["learned"] == [r["id"] for r in rows if r["split"] == "train"]  # never eval
+
+        eval_id = next(f"e{i}" for i in range(99) if split_for(f"e{i}") == "eval")
+        weight = load_learner(store).model.weight.clone()
+        store.add_question(eval_id, "where is the key", 1e12, rows[0]["correct_ids"], rows[0]["candidate_ids"], None)
+        assert torch.equal(load_learner(store).model.weight, weight)  # a labeled eval question teaches nothing
+        assert torch.load(store.dir / STATE_FILE)["learned"] == state["learned"]
+    finally:
+        builtins.input, sonara_recall.ask_qwen = real_input, real_ask
+        shutil.rmtree(tmp)
+    print("✓ shadow chat tests passed")
+
 if __name__ == "__main__":
     test_clock()
     test_sonara()
+    test_shadow_chat()

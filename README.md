@@ -17,7 +17,7 @@ A small learner that builds on experience over time. Qwen (run locally through O
 ollama pull qwen3-embedding:0.6b
 ollama pull qwen2.5:1.5b-instruct
 python3 test_sonara_memory.py && python3 test_sonara_recall.py && python3 test_sonara.py
-python3 sonara_recall.py chat     # ask questions, mark useful memories
+python3 sonara_recall.py chat     # ask questions, mark useful memories; Sonara ranks in shadow
 python3 sonara_recall.py score    # baseline recall@5 on the frozen eval questions
 python3 sonara.py curve           # Sonara vs baseline, rule and control, in time order
 ```
