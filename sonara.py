@@ -1,14 +1,16 @@
-"""sonara.py — Sonara v1: a linear scorer that learns recall from verified feedback.
+"""sonara.py — Sonara: a linear scorer that learns recall from verified feedback.
 
-Each (question, memory) pair gets the baseline's inputs (cosine, age, source) plus
-three experience inputs. Those come only from train-split feedback given before
-the question was asked, so eval labels never become inputs. See SONARA_PLAN.md,
-"Sonara v1 design".
+Each (question, memory) pair gets the baseline's inputs (cosine, age, source), day-
+clock inputs, and three experience inputs. The clock is read when Sonara runs: "now"
+is the question's ask time to the second, and every memory is a point on the same
+timeline. Experience inputs come only from train-split feedback given before the
+question was asked, so eval labels never become inputs. See SONARA_PLAN.md.
 
     python3 sonara.py curve [--split YYYY-MM-DD ...]
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import math
 import statistics
@@ -21,13 +23,41 @@ from sonara_memory import Memory
 from sonara_recall import K, Store, baseline_rank, baseline_scores, hit, rank_by, tune
 
 SOURCES = ("user_note", "user_question", "qwen_answer", "qwen_follow_up")
-FEATURES = (["cosine", "log_age_days"] + [f"source:{s}" for s in SOURCES]
+CLOCK = ["log_gap_seconds", "same_time_of_day", "same_day_of_week", "same_time_of_year",
+         "log_sessions_between", "newer_similar"]
+FEATURES = (["cosine"] + CLOCK + [f"source:{s}" for s in SOURCES]
             + ["log_useful", "log_shown_not_useful", "neighbor_vote"])
-COS, USEFUL, SHOWN, VOTE = 0, 6, 7, 8
+COS, SRC, USEFUL, SHOWN, VOTE = 0, 1 + len(CLOCK), 11, 12, 13
+SESSION_GAP = 3600.0  # a quiet hour or more starts a new session
 FRACTIONS = (0.25, 0.5, 0.75, 1.0)
 SEEDS = 5
 EPOCHS = 50
 RULE_GRID = (0.1, 0.2, 0.4, 0.8)
+
+
+def clock_phases(epoch: float) -> Tuple[float, float, float]:
+    """Local time of day, day of week and time of year, each as a fraction of its cycle."""
+    t = dt.datetime.fromtimestamp(epoch)
+    day = (t.hour * 3600 + t.minute * 60 + t.second + t.microsecond / 1e6) / 86400
+    return day, (t.weekday() + day) / 7, (t.timetuple().tm_yday - 1 + day) / 365.25
+
+
+def clock_inputs(mems: Sequence[Memory], vecs: torch.Tensor, now: float) -> torch.Tensor:
+    """(N, 6) day-clock inputs for memories, relative to now on one continuous timeline."""
+    times = torch.tensor([m.timestamp_epoch for m in mems], dtype=torch.float64)
+    x = torch.zeros(len(mems), len(CLOCK))
+    x[:, 0] = torch.log1p(now - times).float()
+    now_phase = torch.tensor(clock_phases(now))
+    phases = torch.tensor([clock_phases(m.timestamp_epoch) for m in mems])
+    x[:, 1:4] = torch.cos(2 * math.pi * (phases - now_phase))  # 1 = same point in the cycle
+    ordered = sorted(times.tolist()) + [now]
+    starts = [b for a, b in zip(ordered, ordered[1:]) if b - a >= SESSION_GAP]
+    x[:, 4] = torch.log1p(torch.tensor([len(starts) - bisect.bisect_right(starts, t) for t in times.tolist()],
+                                       dtype=torch.float32))
+    newer = times[None, :] > times[:, None]  # [i, j]: memory j was written after memory i
+    sims = (vecs @ vecs.T).masked_fill(~newer, -1.0)
+    x[:, 5] = sims.max(dim=1).values.clamp(min=0.0)
+    return x
 
 
 def features(store: Store, question: str, asked_epoch: float,
@@ -37,15 +67,16 @@ def features(store: Store, question: str, asked_epoch: float,
     if not mems:
         return mems, x
     index = {m.id: i for i, m in enumerate(mems)}
-    x[:, COS] = store.similarities(question, mems)
-    x[:, 1] = torch.tensor([math.log1p((asked_epoch - m.timestamp_epoch) / 86400) for m in mems])
+    vecs = F.normalize(store.encoder.vectors([m.content for m in mems]), dim=1)
+    qvec = F.normalize(store.encoder.vectors([question])[0], dim=0)
+    x[:, COS] = vecs @ qvec
+    x[:, 1:SRC] = clock_inputs(mems, vecs, asked_epoch)
     for i, m in enumerate(mems):
         if m.source in SOURCES:
-            x[i, 2 + SOURCES.index(m.source)] = 1.0
+            x[i, SRC + SOURCES.index(m.source)] = 1.0
     past = [q for q in history if q["asked_epoch"] < asked_epoch]
     if past:
-        sims = F.normalize(store.encoder.vectors([q["question"] for q in past]), dim=1) @ \
-            F.normalize(store.encoder.vectors([question])[0], dim=0)
+        sims = F.normalize(store.encoder.vectors([q["question"] for q in past]), dim=1) @ qvec
         for q, sim in zip(past, sims.tolist()):
             for mid in q["correct_ids"]:
                 if mid in index:

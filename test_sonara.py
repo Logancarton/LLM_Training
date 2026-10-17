@@ -3,8 +3,38 @@ import shutil
 import tempfile
 
 from test_sonara_recall import FakeEncoder
-from sonara import FEATURES, VOTE, curve, features
+import torch
+import torch.nn.functional as F
+
+from sonara import CLOCK, FEATURES, VOTE, clock_inputs, curve, features
 from sonara_recall import Store
+
+
+def test_clock():
+    tmp = tempfile.mkdtemp()
+    try:
+        store = Store(tmp, encoder=FakeEncoder())
+        now = 1784203200.0  # mid-July, no daylight-saving change nearby
+        offsets = {"dentist on Tuesday": 7 * 86400, "dentist moved to Friday": 86400,
+                   "garlic planted": 12 * 3600, "garlic watered": 12 * 3600 - 60, "dentist on Tuesday ": 30}
+        mems = []
+        for text, back in offsets.items():
+            m = store.add(text, "user_note")
+            m.timestamp_epoch = now - back
+            mems.append(m)
+        x = clock_inputs(mems, F.normalize(store.encoder.vectors([m.content for m in mems]), dim=1), now)
+        col = {name: x[:, i] for i, name in enumerate(CLOCK)}
+        assert abs(col["log_gap_seconds"][4] - torch.log1p(torch.tensor(30.0))) < 1e-4  # seconds, not days
+        assert col["same_time_of_day"][0] > 0.99 and col["same_time_of_day"][1] > 0.99  # 7 days, 1 day ago
+        assert col["same_time_of_day"][2] < -0.99  # 12 hours ago: opposite side of the day
+        assert col["same_day_of_week"][0] > 0.99 and col["same_day_of_week"][1] < 0.7
+        # Sessions start after quiet hours: before 7 days ago, 1 day ago, 12 h ago, 30 s ago.
+        assert col["log_sessions_between"].tolist() == torch.log1p(torch.tensor([3.0, 2.0, 1.0, 1.0, 0.0])).tolist()
+        assert col["newer_similar"][0] > 0.99  # the same text was written again later
+        assert col["newer_similar"][4] == 0.0  # nothing is newer than the latest memory
+    finally:
+        shutil.rmtree(tmp)
+    print("✓ clock tests passed")
 
 
 def test_sonara():
@@ -43,4 +73,5 @@ def test_sonara():
 
 
 if __name__ == "__main__":
+    test_clock()
     test_sonara()

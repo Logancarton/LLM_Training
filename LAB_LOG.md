@@ -35,3 +35,10 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Changed:** added the control: the same learner, trained and ranked with an empty history, so its three experience inputs are always 0. Data is the same as Run 3.
 - **Result:** at every training size, the control got 6/6, the same as Sonara. Sonara minus control = +0.0. The +16.7 over the baseline is all optimizer strength (source weights), with nothing from experience. This confirms Run 3's reading.
 - **Test check:** in the synthetic test, the control first reached 100% by learning a negative cosine weight, a shortcut that test happened to allow. Adding questions where cosine is the right signal closes it. Now experience is the only way to find the target: control 46%, Sonara 69%, baseline 54%.
+
+## 2026-10-17 · Run 5: day-clock inputs on Run 1 data
+
+- **Changed:** one change, the clock. Age in days was replaced with six clock inputs: gap in log-seconds; same time of day, same day of week and same time of year (cosine of the cycle difference); log sessions between memory and now (a quiet hour or more starts a session); and similarity of the most similar newer memory. Sonara and the no-experience control both get them; the fixed baseline doesn't.
+- **Result:** at every training size, Sonara got 6/6 (sd 0), except at 7 train questions, where one seed missed once (93.3%, sd 8.2). The control got 6/6 and the baseline 5/6. The clock changed nothing measurable here.
+- **Weights:** newer similar memory −3.3, in the expected direction (a replaced memory is less useful). The time-of-day weight (−1.8) is an artifact of this test, not something learned about time: the notes were back-dated to the same time of day, and the chat memories were minutes old.
+- **Wrong answers:** none at full training. recall@5 can't show whether the clock picks the current fact (dentist, longest run, current book), because old and new versions both land in the top 5.

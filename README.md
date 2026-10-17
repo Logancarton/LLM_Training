@@ -7,7 +7,7 @@ A small learner that builds on experience over time. Qwen (run locally through O
 - `sonara_memory.py`: append-only, timestamped memory of events, with retrieval and a CLI.
 - `sonara_text_encoder.py`: frozen Qwen embedding vectors from local Ollama (loopback only), cached.
 - `sonara_recall.py`: chat with Qwen while logging experience, the fixed recall baseline, and recall@5 scoring.
-- `sonara.py`: Sonara v1, a linear scorer trained on your feedback, plus the learning-curve report against the baseline and a fixed feedback rule.
+- `sonara.py`: Sonara, a linear scorer trained on your feedback with day-clock inputs, plus the learning-curve report against the baseline and a fixed feedback rule.
 - `test_sonara_memory.py`, `test_sonara_recall.py`, `test_sonara.py`: tests (no Ollama needed).
 - `LAB_LOG.md`: one entry per run.
 
