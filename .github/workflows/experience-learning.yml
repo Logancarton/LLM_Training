@@ -87,6 +87,9 @@ jobs:
           r = json.load(open('artifacts/causal_learning_report.json'))
           assert r['summary']['one_verified_experience_per_seed']
           assert r['summary']['all_verifications_passed']
+          assert r['summary']['two_verified_experiences_per_pair_run']
+          assert r['summary']['pair_verifications_passed']
+          assert all(len(run['one_experience']['trial']['action_scores']) == 2 for run in r['action_pair_runs'])
           PY
       - name: Publish experiment data
         if: always()
