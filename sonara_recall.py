@@ -14,6 +14,7 @@ from __future__ import annotations
 import bisect
 import datetime as dt
 import hashlib
+import itertools
 import json
 import math
 import random
@@ -161,22 +162,32 @@ def hit(ranked: Sequence[Memory], correct_ids: Sequence[str], k: int = K) -> boo
 
 
 def tune(store: Store, train: List[Dict]) -> Dict[str, float]:
-    """Coordinate ascent over the baseline's settings on train questions only; ties keep the current value."""
+    """Try every combination of the baseline's settings on train questions only and keep the
+    one with the most hits; ties keep the defaults. Each question's cosines, ages and sources
+    are computed once, then all combinations are scored together."""
     params = dict(DEFAULT_PARAMS)
     if not train:
         return params
     sources = sorted({m.source for m in store.memory.memories.values()})
-    grid = dict(GRID, **{"bias:" + s: BIAS_GRID for s in sources})
-    def recall(p):
-        return sum(hit(baseline_rank(store, q["question"], q["asked_epoch"], p), q["correct_ids"]) for q in train)
-    best = recall(params)
-    for _ in range(2):
-        for key, values in grid.items():
-            for v in values:
-                trial = dict(params, **{key: v})
-                if (r := recall(trial)) > best:
-                    params, best = trial, r
-    return params
+    keys = list(GRID) + ["bias:" + s for s in sources]
+    combos = torch.tensor(list(itertools.product(*GRID.values(), *[BIAS_GRID] * len(sources))), dtype=torch.float64)
+    hits = torch.zeros(len(combos))
+    for q in train:
+        mems = candidates(store, q["question"], q["asked_epoch"])
+        correct = torch.tensor([m.id in q["correct_ids"] for m in mems], dtype=torch.bool)
+        if not correct.any():
+            continue
+        age_days = torch.tensor([(q["asked_epoch"] - m.timestamp_epoch) / 86400 for m in mems])
+        src = torch.tensor([sources.index(m.source) for m in mems])
+        recency = torch.exp(-math.log(2) * age_days[None, :] / combos[:, 1:2])
+        scores = store.similarities(q["question"], mems) + combos[:, 0:1] * recency + combos[:, 2:][:, src]
+        above = (scores > scores[:, correct].max(dim=1).values[:, None]).sum(dim=1)
+        hits += (above < K).float()
+    default = [params.get(k, 0.0) for k in keys]
+    best = int((combos == torch.tensor(default, dtype=torch.float64)).all(dim=1).nonzero()[0])
+    if hits.max() > hits[best]:
+        best = int(hits.argmax())
+    return {k: v for k, v in zip(keys, combos[best].tolist()) if k in DEFAULT_PARAMS or v != 0.0}
 
 
 def live_params(store: Store) -> Dict[str, float]:

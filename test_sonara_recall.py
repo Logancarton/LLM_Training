@@ -65,6 +65,16 @@ def test_recall():
         assert params["bias:qwen_answer"] < 0
         assert hit(baseline_rank(store, "Jake liked what", 20 * day, params), [old.id])
 
+        # When two generated sources crowd the note together, no single bias fixes it; the joint
+        # search finds both (one-at-a-time coordinate ascent stayed on the defaults here).
+        for i in range(5):
+            store.add(f"Jake liked what {i}", "user_question").timestamp_epoch = 15 * day
+            store.add(f"Jake liked what, maybe {i}", "qwen_follow_up").timestamp_epoch = 15 * day
+        assert not hit(baseline_rank(store, "Jake liked what", 20 * day, params), [old.id])
+        joint = tune(store, train)
+        assert joint["bias:user_question"] < 0 and joint["bias:qwen_follow_up"] < 0
+        assert hit(baseline_rank(store, "Jake liked what", 20 * day, joint), [old.id])
+
         # Every method ranks from a bounded set: the top memories by cosine plus the newest.
         for i in range(70):
             store.add(f"filler note {i}", "user_note").timestamp_epoch = 16 * day + i
