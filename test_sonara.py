@@ -6,7 +6,7 @@ from test_sonara_recall import FakeEncoder
 import torch
 import torch.nn.functional as F
 
-from sonara import CLOCK, FEATURES, LOG_YEAR, STATE_FILE, VOTE, clock_inputs, features, load_learner, run
+from sonara import CLOCK, CLOCK_DECAY, FEATURES, LOG_YEAR, LR, STATE_FILE, STEPS, VOTE, Learner, clock_inputs, features, load_learner, run
 from sonara_recall import DEFAULT_PARAMS, TUNE_EVERY, Store, split_for
 
 
@@ -98,6 +98,14 @@ def test_sonara():
         assert x[[m.id for m in mems].index(target.id), VOTE] > 0.99  # earlier identical questions vote
         mems, x = features(store, q["question"], q["asked_epoch"], [])
         assert x[:, VOTE].abs().sum() == 0  # no history, no experience inputs
+
+        # Every memory here shares one timestamp, so life position is 0 for all: no gradient, only decay.
+        learner = Learner()
+        life = 1 + CLOCK.index("log_life_seconds")
+        with torch.no_grad():
+            learner.model.weight[0, life] = 1.0
+        learner.learn(store, store.questions()[3], store.questions()[:3])
+        assert abs(learner.model.weight[0, life].item() - (1 - LR * CLOCK_DECAY) ** STEPS) < 1e-6
 
         results = run(store)
         assert saved.model.weight[0].tolist() == run.final_weights  # run learns the same way

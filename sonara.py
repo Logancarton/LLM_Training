@@ -40,6 +40,9 @@ LOG_YEAR = math.log1p(365 * 86400)
 PERIODS = 4
 LR = 0.01
 STEPS = 10  # learning steps per verified question
+# Clock weights shrink by LR * CLOCK_DECAY each step (decoupled, as in AdamW), so a clock weight
+# settles near 0 under chance patterns and near 1 only when every question pushes the same way.
+CLOCK_DECAY = 1.0
 RULE_GRID = (0.1, 0.2, 0.4, 0.8)
 METHODS = ("baseline", "rule", "control", "sonara")
 STATE_FILE = "sonara_state.pt"
@@ -123,7 +126,8 @@ class Learner:
             return rank_by(mems, self.model(x).squeeze(1))
 
     def learn(self, store: Store, q: Dict, history: Sequence[Dict]) -> None:
-        """Softmax over the question's labeling pool; cross-entropy on its useful memories."""
+        """Softmax over the question's labeling pool; cross-entropy on its useful memories.
+        Clock weights decay toward 0 each step."""
         mems, x = self._features(store, q, history)
         pool = set(q.get("candidate_ids", [])) | set(q["correct_ids"])
         rows = [i for i, m in enumerate(mems) if m.id in pool]
@@ -135,6 +139,8 @@ class Learner:
             self.opt.zero_grad()
             loss.backward()
             self.opt.step()
+            with torch.no_grad():
+                self.model.weight[0, 1:SRC] *= 1 - LR * CLOCK_DECAY
 
 
 def code_version() -> str:
