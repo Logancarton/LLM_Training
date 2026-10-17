@@ -32,7 +32,7 @@ import os
 import random
 import re
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -120,7 +120,10 @@ class CharSubwordEmbedding(nn.Module):
         self.hash_embeddings = nn.Embedding(hash_buckets, dim)
         self.projection = nn.Linear(dim * 2, dim)
         self.norm = nn.LayerNorm(dim)
-        self._ngram_cache: Dict[str, List[int]] = {}
+        self._ngram_cache: OrderedDict[str, List[int]] = OrderedDict()
+        self._ngram_cache_capacity = 4096
+        # Internal ablation switch: no learned weights or representational features change.
+        self._vectorized_char_bags = True
 
     def _hash_ngram(self, ngram: str) -> int:
         h = int(hashlib.md5(ngram.encode("utf-8")).hexdigest()[:8], 16)
@@ -130,6 +133,7 @@ class CharSubwordEmbedding(nn.Module):
         t = token.lower()
         cached = self._ngram_cache.get(t)
         if cached is not None:
+            self._ngram_cache.move_to_end(t)
             return cached
         wrapped = f"<{t}>"
         ngrams = [wrapped[i:i+n] for n in (2, 3) for i in range(len(wrapped) - n + 1)]
@@ -137,6 +141,8 @@ class CharSubwordEmbedding(nn.Module):
             ngrams = [wrapped]
         buckets = [self._hash_ngram(ng) for ng in ngrams]
         self._ngram_cache[t] = buckets
+        if len(self._ngram_cache) > self._ngram_cache_capacity:
+            self._ngram_cache.popitem(last=False)
         return buckets
 
     def embed_char_only(self, token_strings: Sequence[str], device: torch.device) -> torch.Tensor:
@@ -151,6 +157,13 @@ class CharSubwordEmbedding(nn.Module):
             all_buckets.extend(b)
             offsets.append((start, len(all_buckets)))
         flat_ids = torch.tensor(all_buckets, dtype=torch.long, device=device)
+        if self._vectorized_char_bags and not torch.is_grad_enabled():
+            # Equivalent per-token means in one embedding-bag kernel. Hash indices
+            # are weight-independent, while gradients still reach hash_embeddings.
+            starts = torch.tensor([s for s, _ in offsets], dtype=torch.long, device=device)
+            return F.embedding_bag(
+                flat_ids, self.hash_embeddings.weight, starts, mode="mean"
+            )
         flat_vecs = self.hash_embeddings(flat_ids)
         char_vecs = [flat_vecs[s:e].mean(dim=0) for s, e in offsets]
         return torch.stack(char_vecs, dim=0)
@@ -474,6 +487,7 @@ class PointerGeneratorHead(nn.Module):
             nn.Tanh(),
             nn.Linear(dim, 1),
         )
+        self._vectorized_token_scoring = True
 
     def forward(
         self,
@@ -523,24 +537,53 @@ class PointerGeneratorHead(nn.Module):
         ):
             cand_prob_accum = torch.zeros(num_cands, device=device)
             overlap_accum = torch.tensor(0.0, device=device)
-            for t, (occ_vecs, occ_sc, c_ids) in enumerate(
-                zip(event_token_occ_vecs, event_token_occ_scalars, event_token_cand_ids)
-            ):
-                if not c_ids or occ_vecs.numel() == 0:
-                    continue
-                M = len(c_ids)
-                sc_vec = self.tok_scalar_proj(occ_sc)  # (M, dim)
-                tok_feat = occ_vecs + sc_vec           # (M, dim)
-                q_exp = q_v.unsqueeze(0).expand(M, -1)
-                tok_logits = self.token_scorer(
-                    torch.cat([tok_feat, q_exp, tok_feat * q_exp], dim=-1)
-                ).squeeze(-1)
-                c_idx_tensor = torch.tensor(c_ids, dtype=torch.long, device=device)
-                tok_logits = tok_logits + 0.05 * sem_scores[c_idx_tensor]
-                tok_probs = F.softmax(tok_logits, dim=-1)  # (M,)
-                weighted_probs = event_attn[t] * tok_probs
-                cand_prob_accum.scatter_add_(0, c_idx_tensor, weighted_probs)
-                overlap_accum = overlap_accum + event_attn[t] * (tok_probs * occ_sc[:, 0]).sum()
+            if self._vectorized_token_scoring and not torch.is_grad_enabled():
+                # Score all occurrences in one network call, then keep softmax
+                # within each event. This preserves hierarchical event weights.
+                counts = [len(ids) for ids in event_token_cand_ids]
+                active = [t for t, n in enumerate(counts) if n]
+                if active:
+                    flat_vecs = torch.cat([event_token_occ_vecs[t] for t in active], dim=0)
+                    flat_scalars = torch.cat([event_token_occ_scalars[t] for t in active], dim=0)
+                    flat_ids = torch.tensor(
+                        [i for t in active for i in event_token_cand_ids[t]],
+                        dtype=torch.long, device=device,
+                    )
+                    token_features = flat_vecs + self.tok_scalar_proj(flat_scalars)
+                    query_features = q_v.unsqueeze(0).expand(token_features.size(0), -1)
+                    logits = self.token_scorer(torch.cat([
+                        token_features, query_features, token_features * query_features
+                    ], dim=-1)).squeeze(-1) + 0.05 * sem_scores[flat_ids]
+                    offset = 0
+                    for t in active:
+                        n = counts[t]
+                        tok_probs = F.softmax(logits[offset:offset + n], dim=-1)
+                        weighted = event_attn[t] * tok_probs
+                        cand_prob_accum.scatter_add_(0, flat_ids[offset:offset + n], weighted)
+                        overlap_accum = overlap_accum + event_attn[t] * (
+                            tok_probs * flat_scalars[offset:offset + n, 0]
+                        ).sum()
+                        offset += n
+            else:
+                for t, (occ_vecs, occ_sc, c_ids) in enumerate(
+                    zip(event_token_occ_vecs, event_token_occ_scalars, event_token_cand_ids)
+                ):
+                    if not c_ids or occ_vecs.numel() == 0:
+                        continue
+                    M = len(c_ids)
+                    sc_vec = self.tok_scalar_proj(occ_sc)
+                    tok_feat = occ_vecs + sc_vec
+                    q_exp = q_v.unsqueeze(0).expand(M, -1)
+                    tok_logits = self.token_scorer(
+                        torch.cat([tok_feat, q_exp, tok_feat * q_exp], dim=-1)
+                    ).squeeze(-1)
+                    c_idx_tensor = torch.tensor(c_ids, dtype=torch.long, device=device)
+                    tok_logits = tok_logits + 0.05 * sem_scores[c_idx_tensor]
+                    tok_probs = F.softmax(tok_logits, dim=-1)
+                    cand_prob_accum.scatter_add_(0, c_idx_tensor, event_attn[t] * tok_probs)
+                    overlap_accum = overlap_accum + event_attn[t] * (
+                        tok_probs * occ_sc[:, 0]
+                    ).sum()
             pointer_probs = cand_prob_accum / cand_prob_accum.sum().clamp_min(1e-9)
             ptr_query_overlap = overlap_accum
         else:
@@ -599,6 +642,39 @@ class NeuralWorldModel(nn.Module):
         self.tracker = WorldStateTracker(dim=dim)
         self.reasoner = WorldReasoningCore(dim=dim)
         self.head = PointerGeneratorHead(dim=dim)
+        # Cache only weight-independent tokenization and candidate positions,
+        # never gradient-bearing neural states or authoritative memory.
+        self._event_plan_cache: OrderedDict = OrderedDict()
+        self._event_plan_capacity = 16
+        self._cache_event_plans = True
+
+    def _prepare_events(
+        self, events: Sequence[str]
+    ) -> Tuple[List[List[str]], List[str], List[List[int]]]:
+        """Bounded cache of static event text features (never neural tensors)."""
+        key = tuple(events)
+        if self._cache_event_plans and key in self._event_plan_cache:
+            self._event_plan_cache.move_to_end(key)
+            return self._event_plan_cache[key]
+        tokens = [tokenize(event) for event in events]
+        candidates: List[str] = []
+        hits: List[List[int]] = []
+        indexed: Dict[str, int] = {}
+        for event_index, event_tokens in enumerate(tokens):
+            for token in dict.fromkeys(event_tokens):
+                if not is_content_token(token):
+                    continue
+                if token not in indexed:
+                    indexed[token] = len(candidates)
+                    candidates.append(token)
+                    hits.append([])
+                hits[indexed[token]].append(event_index)
+        prepared = tokens, candidates, hits
+        if self._cache_event_plans:
+            self._event_plan_cache[key] = prepared
+            if len(self._event_plan_cache) > self._event_plan_capacity:
+                self._event_plan_cache.popitem(last=False)
+        return prepared
 
     def _encode_episode_and_query(
         self,
@@ -622,12 +698,8 @@ class NeuralWorldModel(nn.Module):
         Shared differentiable forward backbone for both inference and loss computation.
         """
         query_tokens = tokenize(query)
-        candidates = extract_content_candidates(events)
+        tokenized_events, candidates, candidate_indices = self._prepare_events(events)
         cand_to_idx = {c: idx for idx, c in enumerate(candidates)}
-        candidate_indices = []
-        for cand in candidates:
-            ev_hits = [i for i, ev in enumerate(events) if cand in tokenize(ev)]
-            candidate_indices.append(ev_hits)
 
         if not events:
             q_vec = self.event_encoder(query_tokens, word_to_id, device)
@@ -648,7 +720,6 @@ class NeuralWorldModel(nn.Module):
 
         T = len(events)
         Lq = len(query_tokens)
-        tokenized_events = [tokenize(ev) for ev in events]
         step_indices = torch.arange(T, dtype=torch.long, device=device)
         t_vecs = self.temporal_encoding(step_indices)  # (T, dim)
 
@@ -1061,6 +1132,14 @@ class SonaraWorldModel:
         self.session_events: List[str] = []
         self.active_expectations: List[Dict[str, Any]] = []
         self.replay_buckets: Dict[str, List[Tuple[List[str], str, str]]] = defaultdict(list)
+        self._max_replay_buckets = 64
+        # Optional experiment-only replay compute cap; the default preserves
+        # PR #9's full verified replay until an accuracy gate supports a limit.
+        self._max_replay_examples_per_update: Optional[int] = None
+        self._session_event_terms: List[frozenset[str]] = []
+        # Sparse selection is experimental: do not silently omit unresolved causal history.
+        self._sparse_session_activation = False
+        self._max_active_events = 24
         self.trained_examples_count: int = 0
         self.enabled: bool = False
 
@@ -1090,16 +1169,51 @@ class SonaraWorldModel:
         cleaned = observation.strip()
         if cleaned:
             self.session_events.append(cleaned)
+            terms = frozenset(tokenize(cleaned))
+            self._session_event_terms.append(terms)
             self.register_vocabulary(tokenize(cleaned))
 
     def clear_session(self) -> None:
         self.session_events.clear()
+        self._session_event_terms.clear()
         self.active_expectations.clear()
+        # These caches hold only derived text features, not learned weights.
+        # Explicit session reset must not retain stale episode contents.
+        self.model._event_plan_cache.clear()
+        self.model.embedding._ngram_cache.clear()
+
+    def _activate_session_events(self, question: str) -> List[str]:
+        """Conservative bounded activation from the existing session evidence.
+
+        Skip only clearly unrelated events. When temporal continuity would
+        overflow the budget, fall back to full evidence rather than fabricate
+        a confident answer from a truncated causal sequence. No memory mutation.
+        """
+        history = self.session_events
+        budget = self._max_active_events
+        if not self._sparse_session_activation or len(history) <= budget:
+            return history
+        cues = set(tokenize(question)) - STOPWORDS - STRUCTURAL_WORDS
+        if not cues:
+            return history
+        matches = [
+            i for i, terms in enumerate(self._session_event_terms)
+            if cues.intersection(terms)
+        ]
+        if not matches:
+            return history
+        selected = set(range(max(0, len(history) - 2), len(history)))
+        for i in matches:
+            selected.update(range(max(0, i - 1), min(len(history), i + 2)))
+            if len(selected) > budget:
+                # Ambiguous or unusually long dependency: do not prune.
+                return history
+        return [history[i] for i in sorted(selected)]
 
     def predict(self, question: str, events: Optional[List[str]] = None) -> WorldPrediction:
-        """Produce a neural prediction for a question given observations."""
+        """Predict from evidence; selectively activate only long live histories."""
         self.model.eval()
-        evs = events if events is not None else self.session_events
+        evs = events if events is not None else self._activate_session_events(question)
         with torch.no_grad():
             _, pred = self.model(evs, question, self.word_to_id, self.device)
         return pred
@@ -1133,17 +1247,32 @@ class SonaraWorldModel:
         primary_loss = self.model.compute_loss(events, question, verified_answer, self.word_to_id, self.device)
         key = self._bucket_key(events, question, verified_answer)
         losses = [primary_loss]
-        for old_key, examples in self.replay_buckets.items():
-            if old_key != key and examples:
-                replay_events, replay_query, replay_answer = examples[-1]
-                losses.append(self.model.compute_loss(
-                    replay_events, replay_query, replay_answer, self.word_to_id, self.device
-                ))
+        eligible = [
+            (old_key, examples[-1])
+            for old_key, examples in self.replay_buckets.items()
+            if old_key != key and examples
+        ]
+        limit = self._max_replay_examples_per_update
+        if limit is not None and len(eligible) > limit:
+            if limit < 1:
+                raise ValueError("Replay compute cap must be positive")
+            # Round-robin balanced categories; do not let the latest label
+            # become the only authority. No fabricated replay samples.
+            start = self.trained_examples_count % len(eligible)
+            eligible = (eligible[start:] + eligible[:start])[:limit]
+        for _, (replay_events, replay_query, replay_answer) in eligible:
+            losses.append(self.model.compute_loss(
+                replay_events, replay_query, replay_answer, self.word_to_id, self.device
+            ))
         metrics = self._apply_verified_loss(torch.stack(losses).mean(), clip_norm)
         bucket = self.replay_buckets[key]
         bucket.append((list(events), question, verified_answer))
         if len(bucket) > 8:
             bucket.pop(0)
+        # Replay is derived from verified feedback and remains bounded.
+        if len(self.replay_buckets) > self._max_replay_buckets:
+            oldest = next(iter(self.replay_buckets))
+            del self.replay_buckets[oldest]
         metrics["loss"] = round(float(primary_loss.detach().item()), 4)
         metrics["replay_examples"] = len(losses) - 1
         return metrics
@@ -1234,11 +1363,12 @@ class SonaraWorldModel:
         temp_path = str(target) + ".tmp"
 
         payload = {
-            "version": 1,
-            "architecture": {"dim": self.dim},
+            "version": 2,
+            "architecture": {"dim": self.dim, "family": "temporal_hierarchical"},
             "word_to_id": self.word_to_id,
             "id_to_word": self.id_to_word,
             "trained_examples_count": self.trained_examples_count,
+            "replay_buckets": dict(self.replay_buckets),
             "state_dict": self.model.state_dict(),
         }
         try:
@@ -1258,8 +1388,39 @@ class SonaraWorldModel:
         except TypeError:
             payload = torch.load(target, map_location=self.device)
 
+        # Check first: a former model's layers can have different shapes even
+        # when its checkpoint also claims version 1. Never partially mutate
+        # a live owner or overwrite an incompatible identity-bearing model.
+        dims = payload.get("architecture", {}).get("dim")
+        old_state = payload["state_dict"]
+        current = self.model.state_dict()
+        if dims != self.dim or old_state.keys() != current.keys() or any(
+            tuple(old_state[key].shape) != tuple(current[key].shape)
+            for key in current
+        ):
+            raise ValueError(
+                "Incompatible world-model checkpoint architecture; original weights "
+                "must be preserved and explicitly migrated or retrained"
+            )
+        if payload.get("version") not in (1, 2):
+            raise ValueError("Unsupported world-model checkpoint version")
+        restored = payload.get("replay_buckets", {})
+        if not isinstance(restored, dict) or len(restored) > self._max_replay_buckets:
+            raise ValueError("Invalid or unbounded checkpoint replay data")
+        for key, examples in restored.items():
+            if not isinstance(key, str) or not isinstance(examples, list) or len(examples) > 8:
+                raise ValueError("Malformed checkpoint replay bucket")
+            for example in examples:
+                if (
+                    not isinstance(example, (tuple, list)) or len(example) != 3
+                    or not isinstance(example[0], list)
+                    or not all(isinstance(part, str) for part in example[0])
+                    or not all(isinstance(part, str) for part in example[1:])
+                ):
+                    raise ValueError("Malformed verified replay example")
+        self.model.load_state_dict(old_state)
         self.word_to_id = payload.get("word_to_id", self.word_to_id)
         self.id_to_word = payload.get("id_to_word", self.id_to_word)
         self.trained_examples_count = payload.get("trained_examples_count", 0)
-        self.model.load_state_dict(payload["state_dict"])
+        self.replay_buckets = defaultdict(list, restored)
         self.model.eval()
