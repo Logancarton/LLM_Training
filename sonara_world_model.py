@@ -539,6 +539,42 @@ class NeuralWorldModel(nn.Module):
         return -torch.log(total_prob)
 
 
+    def compute_action_contrast_loss(
+        self,
+        events: List[str],
+        verified_pairs: Sequence[Tuple[str, str]],
+        word_to_id: Dict[str, int],
+        device: torch.device,
+        *,
+        contrast_weight: float = 1.0,
+        margin: float = 0.5,
+    ) -> torch.Tensor:
+        """Learn the *relative* consequences of two independently verified actions.
+
+        The caller must supply two observed (action-query, outcome) pairs from
+        the same pre-intervention context. This loss never invents an outcome
+        for an untried action. With contrast_weight=0 it is the matched
+        supervised-only control, trained on the exact same two observations.
+        """
+        (query_a, outcome_a), (query_b, outcome_b) = verified_pairs
+        loss_aa = self.compute_loss(events, query_a, outcome_a, word_to_id, device)
+        loss_bb = self.compute_loss(events, query_b, outcome_b, word_to_id, device)
+        supervised = (loss_aa + loss_bb) / 2
+        if contrast_weight == 0:
+            return supervised
+
+        # Negative examples are action/query mismatches, not fabricated events.
+        # softplus(margin + NLL(correct) - NLL(incorrect action)) rewards
+        # the observed action for each outcome over its verified alternative.
+        loss_ba = self.compute_loss(events, query_b, outcome_a, word_to_id, device)
+        loss_ab = self.compute_loss(events, query_a, outcome_b, word_to_id, device)
+        separation = (
+            F.softplus(margin + loss_aa - loss_ba)
+            + F.softplus(margin + loss_bb - loss_ab)
+        ) / 2
+        return supervised + contrast_weight * separation
+
+
 # =====================================================================
 # 7. HIGH-LEVEL COGNITIVE OWNER & INTERACTION LAYER
 # =====================================================================
@@ -630,10 +666,12 @@ class SonaraWorldModel:
         self.model.train()
         self.register_vocabulary(tokenize(" ".join(events) + " " + question + " " + verified_answer))
 
-        # Measure parameter delta
-        before_weights = {name: p.detach().clone() for name, p in self.model.named_parameters()}
-
         loss = self.model.compute_loss(events, question, verified_answer, self.word_to_id, self.device)
+        return self._apply_verified_loss(loss, clip_norm)
+
+    def _apply_verified_loss(self, loss: torch.Tensor, clip_norm: float) -> Dict[str, Any]:
+        """Shared gradient update for ordinary and action-contrast learning."""
+        before_weights = {name: p.detach().clone() for name, p in self.model.named_parameters()}
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if clip_norm > 0:
@@ -650,6 +688,62 @@ class SonaraWorldModel:
         return {
             "loss": round(float(loss.item()), 4),
             "parameter_delta": round(param_delta, 6),
+            "trained_count": self.trained_examples_count,
+        }
+
+
+    def learn_action_contrast(
+        self,
+        events: List[str],
+        verified_pairs: Sequence[Tuple[str, str]],
+        *,
+        steps: int = 8,
+        contrast_weight: float = 1.0,
+        margin: float = 0.5,
+        clip_norm: float = 1.0,
+    ) -> Dict[str, Any]:
+        """Replay two *verified* alternative interventions to learn their distinction.
+
+        This is an existing-world-model gradient path, not a new selector or
+        persistent store. Source verification belongs to the caller; a
+        single observed action cannot authorize a counterfactual label.
+        """
+        pairs = list(verified_pairs)
+        if len(pairs) != 2 or any(len(pair) != 2 for pair in pairs):
+            raise ValueError("Two verified (action query, outcome) pairs required")
+        (query_a, outcome_a), (query_b, outcome_b) = pairs
+        if not query_a.strip() or not query_b.strip() or query_a == query_b:
+            raise ValueError("Action queries must be distinct and nonempty")
+        if not outcome_a.strip() or not outcome_b.strip() or outcome_a == outcome_b:
+            raise ValueError("Contrast requires two distinct verified outcomes")
+        if not isinstance(steps, int) or not 1 <= steps <= 32:
+            raise ValueError("Replay steps must be an integer from 1 to 32")
+        if not 0 <= contrast_weight <= 4 or not 0 <= margin <= 4:
+            raise ValueError("Invalid contrast weight or ranking margin")
+        candidates = set(extract_content_candidates(events)) | set(CLOSED_TO_ID)
+        if outcome_a.lower().strip() not in candidates or outcome_b.lower().strip() not in candidates:
+            raise ValueError("Both outcomes must be representable in pre-action context")
+        self.register_vocabulary(tokenize(" ".join(events + [query_a, query_b, outcome_a, outcome_b])))
+        self.model.train()
+        total_delta = 0.0
+        first_loss = None
+        last = None
+        for _ in range(steps):
+            loss = self.model.compute_action_contrast_loss(
+                events, pairs, self.word_to_id, self.device,
+                contrast_weight=contrast_weight, margin=margin,
+            )
+            if first_loss is None:
+                first_loss = round(float(loss.detach().item()), 4)
+            last = self._apply_verified_loss(loss, clip_norm)
+            total_delta += last["parameter_delta"]
+        return {
+            "initial_loss": first_loss,
+            "loss": last["loss"],
+            "parameter_delta": round(total_delta, 6),
+            "gradient_steps": steps,
+            "verified_pairs": 2,
+            "contrast_weight": contrast_weight,
             "trained_count": self.trained_examples_count,
         }
 
