@@ -38,9 +38,9 @@ Qwen handles language: it reads text, turns it into vectors, and writes answers.
 
 The last three are the "what past feedback said" part. They count only train-split feedback given before the question was asked. Eval labels never become inputs.
 
-**Training.** A softmax over each train question's pool, with cross-entropy on its positives. Adam, fixed seed, retrained from scratch at each time split, and averaged over 5 seeds. The question and memory vectors enter only through cosine similarity, because a learned 1024-dimension projection would overfit a few hundred labels. Learning on top of the raw vectors would be a later change, one at a time.
+**Training (changed 2026-10-17: online).** A softmax over each train question's pool, with cross-entropy on its positives. Sonara learns one verified question at a time, in the order they were asked (Adam, 10 steps per question), and carries its weights forward. It is never shuffled and never retrained from scratch, so its progression lives in its weights. The question and memory vectors enter only through cosine similarity, because a learned 1024-dimension projection would overfit a few hundred labels. Learning on top of the raw vectors would be a later change, one at a time.
 
-**Learning curve.** At each split, train on the first 25/50/75/100% of earlier train questions and score eval recall@5. "The gap grows with experience" means this curve rises while the baseline's stays flat.
+**Learning curve.** Every eval question is scored by each method as it stood at the second the question was asked. The baseline and rule are re-tuned on all earlier train questions every 10 labeled ones. Results are reported in 4 consecutive time periods. "The gap grows with experience" means Sonara's period results rise while the baseline's stay flat.
 
 **No early verdict.** Sonara isn't expected to beat the baseline early on; improvement should be slow. Until there are about 150 eval questions, each run reports the curve (Sonara minus baseline recall@5 vs. number of train questions) and makes no success or failure call. A fixed feedback-bonus rule (memories marked useful for similar past questions get a bonus whose size is tuned on train) is reported next to it as a reference. It shows how much of any gain comes from storing feedback rather than learning from it, but it isn't a success gate. A no-experience control (the same learner, with the three experience inputs always 0) is also reported. Sonara minus this control is the part of the gain that comes from experience, not from a stronger optimizer.
 
@@ -57,9 +57,9 @@ Time is one continuous progression, not just stamps on events. Every time Sonara
 ## How it is measured (decided before building)
 
 1. **Frozen evaluation set:** questions with known correct memories, written before any training and never used for training.
-2. **Time split:** train on earlier experience, test on later questions. Repeat on 3 different split points.
+2. **Time order:** every eval question is tested only with what was learned from earlier train questions, as described in the learning curve above. Results are reported in 4 consecutive periods.
 3. **Metric:** recall@5 (is a correct memory in the top 5?), plus cost per question.
-4. **Success:** Sonara beats the fixed baseline by at least 5 points recall@5 on all 3 splits, and the gap grows as experience grows. Anything less is reported as no effect.
+4. **Success:** Sonara beats the fixed baseline by at least 5 points recall@5 in each of the last 3 periods, and the gap grows as experience grows. Anything less is reported as no effect.
 5. **Every run:** change one thing; read 20 wrong answers before drawing conclusions; add one entry to a lab log.
 
 ## Where experience comes from (decided 2026-10-17)

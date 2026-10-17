@@ -42,3 +42,10 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Result:** at every training size, Sonara got 6/6 (sd 0), except at 7 train questions, where one seed missed once (93.3%, sd 8.2). The control got 6/6 and the baseline 5/6. The clock changed nothing measurable here.
 - **Weights:** newer similar memory −3.3, in the expected direction (a replaced memory is less useful). The time-of-day weight (−1.8) is an artifact of this test, not something learned about time: the notes were back-dated to the same time of day, and the chat memories were minutes old.
 - **Wrong answers:** none at full training. recall@5 can't show whether the clock picks the current fact (dentist, longest run, current book), because old and new versions both land in the top 5.
+
+## 2026-10-17 · Run 6: online learning in time order
+
+- **Changed:** one change. Sonara and the control now learn one train question at a time, in ask order (Adam lr 0.05, 10 steps per question), and carry their weights forward. No shuffling, no retraining from scratch, no seeds. Every eval question is scored as of the second it was asked. The baseline and rule are re-tuned every 10 labeled train questions. The 3 time splits are replaced by 4 consecutive periods.
+- **Data:** Run 1's 20 questions (14 train, 6 eval). This checks the code only.
+- **Result by period** (2 eval questions each; only 3 periods with 6 questions): Sonara 50 / 50 / 100%, baseline 100 / 50 / 100%. The control and rule match the baseline. In the synthetic test's later half, Sonara got 86%, the control 43% and the baseline 57%.
+- **Wrong answers:** both of Sonara's misses ("why wouldn't my vehicle start", "longest run") have top 5s padded with the oldest notes ("Started the Sonara project", the first dentist booking). After a few big steps on few questions, the weights favor older memories (log gap +0.34, time of year +2.0) and rank below its own cosine-only start. This is online-learning noise: lr 0.05 × 10 steps moves the weights a lot on each question. A slower learning rate would be the next single change, chosen before seeing new data, not tuned on this set.

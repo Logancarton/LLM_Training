@@ -6,7 +6,7 @@ from test_sonara_recall import FakeEncoder
 import torch
 import torch.nn.functional as F
 
-from sonara import CLOCK, FEATURES, VOTE, clock_inputs, curve, features
+from sonara import CLOCK, FEATURES, VOTE, clock_inputs, features, run
 from sonara_recall import Store
 
 
@@ -62,11 +62,13 @@ def test_sonara():
         mems, x = features(store, q["question"], q["asked_epoch"], [])
         assert x[:, VOTE].abs().sum() == 0  # no history, no experience inputs
 
-        test, rows = curve(store)
-        assert test and len(rows) == 4 and len(FEATURES) == x.shape[1]
-        last = rows[-1]
-        print({k: last[k] for k in ("n_train", "baseline", "rule", "no_exp", "sonara")})
-        assert last["sonara"] > last["no_exp"] and last["sonara"] > last["baseline"]
+        results = run(store)
+        assert results and len(FEATURES) == x.shape[1]
+        assert [r["n_train"] for r in results] == sorted(r["n_train"] for r in results)  # time order
+        late = results[len(results) // 2:]  # after Sonara has learned from earlier questions
+        rate = {k: sum(r[k] for r in late) / len(late) for k in ("baseline", "control", "sonara")}
+        print(rate)
+        assert rate["sonara"] > rate["control"] and rate["sonara"] > rate["baseline"]
     finally:
         shutil.rmtree(tmp)
     print("✓ sonara tests passed")

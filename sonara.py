@@ -4,9 +4,10 @@ Each (question, memory) pair gets the baseline's inputs (cosine, age, source), d
 clock inputs, and three experience inputs. The clock is read when Sonara runs: "now"
 is the question's ask time to the second, and every memory is a point on the same
 timeline. Experience inputs come only from train-split feedback given before the
-question was asked, so eval labels never become inputs. See SONARA_PLAN.md.
+question was asked, so eval labels never become inputs. Sonara learns in time order
+and carries its weights forward. See SONARA_PLAN.md.
 
-    python3 sonara.py curve [--split YYYY-MM-DD ...]
+    python3 sonara.py curve
 """
 from __future__ import annotations
 
@@ -14,13 +15,13 @@ import bisect
 import datetime as dt
 import math
 import statistics
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
 
 from sonara_memory import Memory
-from sonara_recall import K, Store, baseline_rank, baseline_scores, hit, rank_by, tune
+from sonara_recall import DEFAULT_PARAMS, K, Store, baseline_rank, baseline_scores, hit, rank_by, tune
 
 SOURCES = ("user_note", "user_question", "qwen_answer", "qwen_follow_up")
 CLOCK = ["log_gap_seconds", "same_time_of_day", "same_day_of_week", "same_time_of_year",
@@ -29,9 +30,10 @@ FEATURES = (["cosine"] + CLOCK + [f"source:{s}" for s in SOURCES]
             + ["log_useful", "log_shown_not_useful", "neighbor_vote"])
 COS, SRC, USEFUL, SHOWN, VOTE = 0, 1 + len(CLOCK), 11, 12, 13
 SESSION_GAP = 3600.0  # a quiet hour or more starts a new session
-FRACTIONS = (0.25, 0.5, 0.75, 1.0)
-SEEDS = 5
-EPOCHS = 50
+PERIODS = 4
+LR = 0.05
+STEPS = 10  # learning steps per verified question
+TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
 RULE_GRID = (0.1, 0.2, 0.4, 0.8)
 
 
@@ -89,38 +91,41 @@ def features(store: Store, question: str, asked_epoch: float,
     return mems, x
 
 
-def train(store: Store, labeled: Sequence[Dict], history: Sequence[Dict], seed: int) -> torch.nn.Linear:
-    """Softmax over each question's labeling pool; cross-entropy on its useful memories."""
-    torch.manual_seed(seed)
-    model = torch.nn.Linear(len(FEATURES), 1)
-    with torch.no_grad():  # start as cosine-only ranking; experience moves it from there
-        model.weight.zero_()
-        model.weight[0, COS] = 1.0
-        model.bias.zero_()
-    examples = []
-    for q in labeled:
-        mems, x = features(store, q["question"], q["asked_epoch"], history)
+class Learner:
+    """Sonara's weights, learned one verified question at a time in time order and carried
+    forward: never shuffled, never retrained from scratch. use_experience=False is the
+    control: the same learner with its three experience inputs always 0."""
+
+    def __init__(self, use_experience: bool = True):
+        self.use_experience = use_experience
+        self.model = torch.nn.Linear(len(FEATURES), 1)
+        with torch.no_grad():  # born as cosine-only ranking; experience moves it from there
+            self.model.weight.zero_()
+            self.model.weight[0, COS] = 1.0
+            self.model.bias.zero_()
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=LR)
+
+    def _features(self, store: Store, q: Dict, history: Sequence[Dict]):
+        return features(store, q["question"], q["asked_epoch"], history if self.use_experience else [])
+
+    def rank(self, store: Store, q: Dict, history: Sequence[Dict]) -> List[Memory]:
+        mems, x = self._features(store, q, history)
+        with torch.no_grad():
+            return rank_by(mems, self.model(x).squeeze(1))
+
+    def learn(self, store: Store, q: Dict, history: Sequence[Dict]) -> None:
+        """Softmax over the question's labeling pool; cross-entropy on its useful memories."""
+        mems, x = self._features(store, q, history)
         pool = set(q.get("candidate_ids", [])) | set(q["correct_ids"])
         rows = [i for i, m in enumerate(mems) if m.id in pool]
         positive = torch.tensor([mems[i].id in q["correct_ids"] for i in rows], dtype=torch.bool)
-        if positive.any() and not positive.all():
-            examples.append((x[rows], positive))
-    opt = torch.optim.Adam(model.parameters(), lr=0.05)
-    for _ in range(EPOCHS if examples else 0):
-        for i in torch.randperm(len(examples)).tolist():
-            x, positive = examples[i]
-            loss = -torch.logsumexp(torch.log_softmax(model(x).squeeze(1), 0)[positive], 0)
-            opt.zero_grad()
+        if not positive.any() or positive.all():
+            return
+        for _ in range(STEPS):
+            loss = -torch.logsumexp(torch.log_softmax(self.model(x[rows]).squeeze(1), 0)[positive], 0)
+            self.opt.zero_grad()
             loss.backward()
-            opt.step()
-    return model
-
-
-def sonara_rank(store: Store, model: torch.nn.Linear, question: str, asked_epoch: float,
-                history: Sequence[Dict]) -> List[Memory]:
-    mems, x = features(store, question, asked_epoch, history)
-    with torch.no_grad():
-        return rank_by(mems, model(x).squeeze(1))
+            self.opt.step()
 
 
 def rule_rank(store: Store, params: Dict, bonus: float, question: str, asked_epoch: float,
@@ -142,61 +147,57 @@ def tune_rule(store: Store, params: Dict, labeled: Sequence[Dict], history: Sequ
     return bonus
 
 
-def curve(store: Store, split_epoch=None):
-    """Eval recall@5 for baseline, feedback rule and Sonara as train experience grows."""
-    qs = sorted(store.questions(), key=lambda q: q["asked_epoch"])
-    before = lambda q: split_epoch is None or q["asked_epoch"] < split_epoch
-    train_all = [q for q in qs if q["split"] == "train" and before(q)]
-    test = [q for q in qs if q["split"] == "eval" and q["correct_ids"] and not before(q)] if split_epoch \
-        else [q for q in qs if q["split"] == "eval" and q["correct_ids"]]
+def run(store: Store) -> List[Dict]:
+    """Walk every question in time order. Each eval question is scored by every method as
+    it stood at that second; each train question is then learned from. The baseline and
+    rule are re-tuned on all earlier train questions every TUNE_EVERY labeled ones."""
+    sonara, control = Learner(), Learner(use_experience=False)
+    history: List[Dict] = []  # train questions so far, in time order
+    params, bonus, labeled = dict(DEFAULT_PARAMS), 0.0, []
+    results = []
+    for q in sorted(store.questions(), key=lambda q: q["asked_epoch"]):
+        if q["split"] == "eval":
+            if q["correct_ids"]:
+                ranked = sonara.rank(store, q, history)
+                results.append({
+                    "q": q, "n_train": len(labeled), "sonara_top": ranked[:K],
+                    "sonara": hit(ranked, q["correct_ids"]),
+                    "control": hit(control.rank(store, q, history), q["correct_ids"]),
+                    "baseline": hit(baseline_rank(store, q["question"], q["asked_epoch"], params), q["correct_ids"]),
+                    "rule": hit(rule_rank(store, params, bonus, q["question"], q["asked_epoch"], history),
+                                q["correct_ids"]),
+                })
+            continue
+        if q["correct_ids"]:
+            sonara.learn(store, q, history)
+            control.learn(store, q, history)
+            labeled.append(q)
+            if len(labeled) % TUNE_EVERY == 0:
+                params = tune(store, labeled)
+                bonus = tune_rule(store, params, labeled, history)
+        history.append(q)
+    run.final_weights = sonara.model.weight[0].tolist()
+    return results
 
-    def recall(rank: Callable[[Dict], List[Memory]]) -> float:
-        return 100 * statistics.mean(hit(rank(q), q["correct_ids"]) for q in test) if test else float("nan")
 
-    rows = []
-    for f in FRACTIONS:
-        history = train_all[:math.ceil(f * len(train_all))]
-        labeled = [q for q in history if q["correct_ids"]]
-        params = tune(store, labeled)
-        bonus = tune_rule(store, params, labeled, history)
-        models = [train(store, labeled, history, s) for s in range(SEEDS)]
-        sonara = [recall(lambda q, m=m: sonara_rank(store, m, q["question"], q["asked_epoch"], history))
-                  for m in models]
-        # Control: same learner, empty history, so the three experience inputs are always 0.
-        no_exp = [recall(lambda q, m=train(store, labeled, [], s): sonara_rank(store, m, q["question"],
-                                                                              q["asked_epoch"], []))
-                  for s in range(SEEDS)]
-        rows.append({
-            "fraction": f, "n_train": len(labeled), "bonus": bonus, "model": models[0], "history": history,
-            "baseline": recall(lambda q: baseline_rank(store, q["question"], q["asked_epoch"], params)),
-            "rule": recall(lambda q: rule_rank(store, params, bonus, q["question"], q["asked_epoch"], history)),
-            "sonara": statistics.mean(sonara), "sonara_sd": statistics.pstdev(sonara),
-            "no_exp": statistics.mean(no_exp),
-        })
-    return test, rows
-
-
-def report(store: Store, split_epoch=None) -> None:
-    test, rows = curve(store, split_epoch)
-    print(f"\n{len(test)} eval questions" + (f" asked after {dt.datetime.fromtimestamp(split_epoch):%Y-%m-%d}"
-                                             if split_epoch else ""))
-    print(" train qs | baseline | rule (bonus) | no-exp | sonara (sd)  | vs baseline | vs no-exp")
-    for r in rows:
-        print(f" {r['n_train']:8} | {r['baseline']:7.1f}% | {r['rule']:5.1f}% ({r['bonus']:.1f}) | "
-              f"{r['no_exp']:5.1f}% | {r['sonara']:5.1f}% ({r['sonara_sd']:.1f}) | "
-              f"{r['sonara'] - r['baseline']:+11.1f} | {r['sonara'] - r['no_exp']:+.1f}")
-    last = rows[-1]
-    print("weights (seed 0, all train):",
-          ", ".join(f"{n}={w:+.2f}" for n, w in zip(FEATURES, last["model"].weight[0].tolist())))
-    misses = 0
-    for q in test:
-        if misses == 20:
-            break
-        ranked = sonara_rank(store, last["model"], q["question"], q["asked_epoch"], last["history"])
-        if not hit(ranked, q["correct_ids"]):
-            misses += 1
-            correct = [store.memory.memories[i].content[:70] for i in q["correct_ids"] if i in store.memory.memories]
-            print(f"MISS: {q['question']}\n  correct: {correct}\n  top {K}: {[m.content[:50] for m in ranked[:K]]}")
+def report(store: Store) -> None:
+    results = run(store)
+    print(f"\n{len(results)} eval questions, each scored as of the second it was asked, in {PERIODS} periods")
+    print(" period ends | train qs learned | baseline |   rule | control | sonara | vs baseline | vs control")
+    size = math.ceil(len(results) / PERIODS) if results else 1
+    for i in range(0, len(results), size):
+        chunk = results[i:i + size]
+        pct = {k: 100 * statistics.mean(r[k] for r in chunk) for k in ("baseline", "rule", "control", "sonara")}
+        end = dt.datetime.fromtimestamp(chunk[-1]["q"]["asked_epoch"])
+        print(f" {end:%Y-%m-%d} | {chunk[-1]['n_train']:16} | {pct['baseline']:7.1f}% | {pct['rule']:5.1f}% | "
+              f"{pct['control']:6.1f}% | {pct['sonara']:5.1f}% | {pct['sonara'] - pct['baseline']:+11.1f} | "
+              f"{pct['sonara'] - pct['control']:+.1f}")
+    if results:
+        print("final weights:", ", ".join(f"{n}={w:+.2f}" for n, w in zip(FEATURES, run.final_weights)))
+    for r in [r for r in results if not r["sonara"]][-20:]:  # the 20 most recent misses
+        q = r["q"]
+        correct = [store.memory.memories[i].content[:70] for i in q["correct_ids"] if i in store.memory.memories]
+        print(f"MISS: {q['question']}\n  correct: {correct}\n  top {K}: {[m.content[:50] for m in r['sonara_top']]}")
 
 
 def main() -> None:
@@ -204,11 +205,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["curve"])
     parser.add_argument("--dir", default="sonara_memories")
-    parser.add_argument("--split", action="append", help="time split date YYYY-MM-DD; repeat for 3 splits")
     args = parser.parse_args()
-    store = Store(args.dir)
-    for split in args.split or [None]:
-        report(store, dt.datetime.fromisoformat(split).timestamp() if split else None)
+    report(Store(args.dir))
 
 
 if __name__ == "__main__":

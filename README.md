@@ -19,7 +19,7 @@ ollama pull qwen2.5:1.5b-instruct
 python3 test_sonara_memory.py && python3 test_sonara_recall.py && python3 test_sonara.py
 python3 sonara_recall.py chat     # ask questions, mark useful memories
 python3 sonara_recall.py score    # baseline recall@5 on the frozen eval questions
-python3 sonara.py curve --split 2026-11-01 --split 2026-11-15 --split 2026-12-01
+python3 sonara.py curve           # Sonara vs baseline, rule and control, in time order
 ```
 
 Earlier world-model experiments and their reports are in git history (branch `research/world-model-learned-lexicon`).
