@@ -12,8 +12,8 @@ EVALUATION CONDITIONS (As specified in Experiment 1):
     B. Neural training: Gradient descent (AdamW) updating actual neural weights.
     C. Unseen generalization: Completely disjoint entities (unseen people, objects,
        locations), longer sequences, novel action combinations, missing observations.
-    D. Shuffled-time control: Training on chronologically disrupted sequences to test
-       whether temporal ordering contributes meaningfully to performance.
+    D. Shuffled-time control: Training and evaluating on chronologically disrupted
+       sequences to test whether temporal ordering contributes meaningfully to performance.
     E. Memory-only control: Deterministic episodic memory retrieval without neural
        world modeling.
     F. Frozen-model control: Identical architecture with frozen random weights.
@@ -423,12 +423,30 @@ def run_experiment_seed(
         for q in sc.questions
     ]
 
+    rng = random.Random(seed)
+    # Build a stratified round-robin schedule across question categories & sub-cases
+    # so short CI runs (e.g. --steps 40) cover all cognitive capabilities evenly.
+    strata: Dict[str, List[Tuple[List[str], str, str]]] = defaultdict(list)
+    for sc in train_scenarios:
+        is_corr = any("correction" in ev.lower() for ev in sc.events)
+        for q in sc.questions:
+            s_key = f"{q.category}_{q.target}" if q.category in ("event_order", "correction") else f"{q.category}_{int(is_corr)}"
+            strata[s_key].append((sc.events, q.question, q.target))
+    for s_list in strata.values():
+        rng.shuffle(s_list)
+    stratified_pairs: List[Tuple[List[str], str, str]] = []
+    max_len = max((len(v) for v in strata.values()), default=0)
+    stratum_keys = sorted(strata.keys())
+    for idx in range(max_len):
+        for s_key in stratum_keys:
+            if idx < len(strata[s_key]):
+                stratified_pairs.append(strata[s_key][idx])
+
     train_losses = []
     train_start_time = time.monotonic()
-    rng = random.Random(seed)
 
     for step in range(steps):
-        events, query, target = rng.choice(train_pairs)
+        events, query, target = stratified_pairs[step % len(stratified_pairs)]
         step_metrics = wm_trained.learn_step(events, query, target)
         train_losses.append(step_metrics["loss"])
 
@@ -451,18 +469,33 @@ def run_experiment_seed(
     # Condition D: Shuffled-Time Control
     # -------------------------------------------------------------
     wm_shuffled = SonaraWorldModel(device=device, dim=dim, lr=lr)
-    shuffled_pairs = []
+    shuffled_strata: Dict[str, List[Tuple[List[str], str, str]]] = defaultdict(list)
     for sc in train_scenarios:
         permuted_events = list(sc.events)
         rng.shuffle(permuted_events)
+        is_corr = any("correction" in ev.lower() for ev in sc.events)
         for q in sc.questions:
-            shuffled_pairs.append((permuted_events, q.question, q.target))
+            s_key = f"{q.category}_{q.target}" if q.category in ("event_order", "correction") else f"{q.category}_{int(is_corr)}"
+            shuffled_strata[s_key].append((permuted_events, q.question, q.target))
+    shuffled_pairs: List[Tuple[List[str], str, str]] = []
+    for idx in range(max_len):
+        for s_key in sorted(shuffled_strata.keys()):
+            if idx < len(shuffled_strata[s_key]):
+                shuffled_pairs.append(shuffled_strata[s_key][idx])
 
-    for _ in range(steps):
-        events, query, target = rng.choice(shuffled_pairs)
+    for step in range(steps):
+        events, query, target = shuffled_pairs[step % len(shuffled_pairs)]
         wm_shuffled.learn_step(events, query, target)
 
-    shuffled_eval = evaluate_model(wm_shuffled, unseen_scenarios, "shuffled_unseen")
+    shuffled_unseen_scenarios = []
+    for sc in unseen_scenarios:
+        perm_ev = list(sc.events)
+        if len(perm_ev) > 1:
+            perm_ev = perm_ev[1:] + perm_ev[:1]
+        shuffled_unseen_scenarios.append(
+            Scenario(id=sc.id, events=perm_ev, questions=sc.questions, is_unseen=sc.is_unseen)
+        )
+    shuffled_eval = evaluate_model(wm_shuffled, shuffled_unseen_scenarios, "shuffled_unseen")
 
     # -------------------------------------------------------------
     # Condition G: Restart Persistence
