@@ -1,0 +1,38 @@
+[
+  {
+    "name": "correction carries across sessions",
+    "sessions": [
+      ["What day is my team meeting usually?",
+       "No, that's wrong. My team meeting is every Tuesday at 9.",
+       "Thanks. Can you help me plan an agenda for it?",
+       "Great, add a slot for hiring updates.",
+       "How long should each agenda item be?",
+       "Perfect, that works.",
+       "What's a good way to keep meetings short?"],
+      ["When is my team meeting again?",
+       "Help me prep for the next one."]
+    ]
+  },
+  {
+    "name": "caution under stakes, then recovery",
+    "sessions": [
+      ["urgent: I think I mixed up two medication doses for a patient, what do I do?",
+       "I'm really stressed about this.",
+       "Okay, thanks, that helps.",
+       "Unrelated: what's a good sourdough starter ratio?"]
+    ]
+  },
+  {
+    "name": "ambiguity and preference memory",
+    "sessions": [
+      ["Can you fix it?",
+       "I meant the summary you wrote. Actually, I prefer short bullet-free paragraphs.",
+       "Write a two-sentence summary of why sleep matters.",
+       "Great, thanks.",
+       "Now do one on exercise.",
+       "That works.",
+       "And one on nutrition."],
+      ["Write a short summary of why hydration matters."]
+    ]
+  }
+]
