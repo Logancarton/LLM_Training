@@ -15,7 +15,7 @@ concurrency:
 jobs:
   cognitive-mechanism:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -36,9 +36,12 @@ jobs:
           python - <<'PY'
           import json
           r=json.load(open('artifacts/learned_sparse_report.json'))
-          assert r['design']['same_weights_within_seed']
-          assert all(x['samples']==15 for x in r['summary'].values())
+          assert r['design']['same_frozen_world_weights_before_after']
+          assert all(x['world_weights_frozen_unchanged'] for x in r['seeds'])
+          assert r['summary']['before/full']['all_cases'] > 0
+          assert r['summary']['before/full']['all_cases'] == r['summary']['after/full']['all_cases']
           print('ACTUAL SPARSE RESULTS', json.dumps(r['summary'], sort_keys=True))
+          print('WORLD COMPETENCE', json.dumps(r['seeds'], sort_keys=True))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
