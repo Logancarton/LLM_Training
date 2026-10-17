@@ -563,6 +563,7 @@ class PointerGeneratorHead(nn.Module):
         event_token_cand_ids: Optional[List[List[int]]] = None,
         global_rel_features: Optional[torch.Tensor] = None,
         query_vec: Optional[torch.Tensor] = None,
+        candidate_answer_logits: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         reasoning_vec: (dim,)
@@ -590,6 +591,12 @@ class PointerGeneratorHead(nn.Module):
 
         num_cands = candidate_embeddings.size(0)
         sem_scores = (candidate_embeddings @ reasoning_vec) / math.sqrt(self.dim)  # (num_candidates,)
+        # Optional learned prior that a candidate word can be an answer at all
+        # (log-probability, so unlikely filler words are pushed down, not banned).
+        answer_bias = (
+            F.logsigmoid(candidate_answer_logits) if candidate_answer_logits is not None
+            else torch.zeros(num_cands, device=device)
+        )
 
         ptr_query_overlap = torch.tensor(0.0, device=device)
 
@@ -616,7 +623,7 @@ class PointerGeneratorHead(nn.Module):
                     query_features = q_v.unsqueeze(0).expand(token_features.size(0), -1)
                     logits = self.token_scorer(torch.cat([
                         token_features, query_features, token_features * query_features
-                    ], dim=-1)).squeeze(-1) + 0.05 * sem_scores[flat_ids]
+                    ], dim=-1)).squeeze(-1) + 0.05 * sem_scores[flat_ids] + answer_bias[flat_ids]
                     offset = 0
                     for t in active:
                         n = counts[t]
@@ -641,7 +648,7 @@ class PointerGeneratorHead(nn.Module):
                         torch.cat([tok_feat, q_exp, tok_feat * q_exp], dim=-1)
                     ).squeeze(-1)
                     c_idx_tensor = torch.tensor(c_ids, dtype=torch.long, device=device)
-                    tok_logits = tok_logits + 0.05 * sem_scores[c_idx_tensor]
+                    tok_logits = tok_logits + 0.05 * sem_scores[c_idx_tensor] + answer_bias[c_idx_tensor]
                     tok_probs = F.softmax(tok_logits, dim=-1)
                     cand_prob_accum.scatter_add_(0, c_idx_tensor, event_attn[t] * tok_probs)
                     overlap_accum = overlap_accum + event_attn[t] * (
@@ -660,7 +667,7 @@ class PointerGeneratorHead(nn.Module):
                         ev_weights.append(torch.tensor(1e-6, device=device))
                 ev_w_tensor = torch.stack(ev_weights, dim=0)
                 sem_scores = sem_scores + torch.log(ev_w_tensor.clamp_min(1e-6))
-            pointer_probs = F.softmax(sem_scores, dim=-1)
+            pointer_probs = F.softmax(sem_scores + answer_bias, dim=-1)
 
         rel_7 = torch.cat([global_rel_features, ptr_query_overlap.unsqueeze(0)], dim=-1)
         rel_vec = self.rel_proj(rel_7)
@@ -763,6 +770,11 @@ class NeuralWorldModel(nn.Module):
         self.sentence_proj = (
             nn.Linear(text_encoder.vector_dim(), dim) if lexicon == "pretrained" else None
         )
+        # Answer gate: a linear probe on the frozen word vector predicting whether a
+        # word can be an answer. Trained from verified answers (see answer_gate_loss).
+        self.answer_gate = (
+            nn.Linear(text_encoder.vector_dim(), 1) if lexicon == "pretrained" else None
+        )
         self.temporal_encoding = TemporalEncoding(dim=dim, max_steps=max_events)
         self.event_encoder = EventEncoder(self.embedding, dim=dim)
         self.tracker = WorldStateTracker(dim=dim)
@@ -854,6 +866,7 @@ class NeuralWorldModel(nn.Module):
                 None,
                 torch.zeros(6, device=device),
                 q_vec,
+                None,
             )
 
         T = len(events)
@@ -1090,7 +1103,26 @@ class NeuralWorldModel(nn.Module):
             event_occ_cids,
             global_rel_features,
             q_vec,
+            self._candidate_answer_logits(candidates, device),
         )
+
+    def _candidate_answer_logits(self, candidates: List[str], device: torch.device) -> Optional[torch.Tensor]:
+        if self.answer_gate is None or not candidates:
+            return None
+        vecs = self.embedding.text_encoder.vectors(candidates).to(device)
+        return self.answer_gate(vecs).squeeze(-1)
+
+    def answer_gate_loss(
+        self, tokens: Sequence[str], answer_words: set, device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        """BCE teaching the answer gate which content words have been verified
+        answers. Targets come only from verified feedback, never a word list."""
+        words = sorted({t for t in tokens if is_content_token(t)})
+        if self.answer_gate is None or not words:
+            return None
+        logits = self._candidate_answer_logits(words, device)
+        targets = torch.tensor([float(w in answer_words) for w in words], device=device)
+        return F.binary_cross_entropy_with_logits(logits, targets)
 
     def forward(
         self,
@@ -1113,6 +1145,7 @@ class NeuralWorldModel(nn.Module):
             event_occ_cids,
             global_rel_features,
             q_vec,
+            answer_logits,
         ) = self._encode_episode_and_query(events, query, word_to_id, device)
 
         if not events:
@@ -1139,6 +1172,7 @@ class NeuralWorldModel(nn.Module):
             event_token_cand_ids=event_occ_cids,
             global_rel_features=global_rel_features,
             query_vec=q_vec,
+            candidate_answer_logits=answer_logits,
         )
 
         # Combine probability distribution
@@ -1189,6 +1223,7 @@ class NeuralWorldModel(nn.Module):
             event_occ_cids,
             global_rel_features,
             q_vec,
+            answer_logits,
         ) = self._encode_episode_and_query(events, query, word_to_id, device)
 
         target_norm = target_answer.lower().strip()
@@ -1210,6 +1245,7 @@ class NeuralWorldModel(nn.Module):
             event_token_cand_ids=event_occ_cids,
             global_rel_features=global_rel_features,
             query_vec=q_vec,
+            candidate_answer_logits=answer_logits,
         )
 
         loss_components = []
@@ -1317,6 +1353,8 @@ class SonaraWorldModel:
         self.last_sparse_trace: Dict[str, Any] = {}
         self._max_active_events = 24
         self.trained_examples_count: int = 0
+        # Verified content answers seen so far; the only supervision for the answer gate.
+        self.answer_words: set = set()
         self.enabled: bool = False
 
         if self.checkpoint_path and self.checkpoint_path.exists():
@@ -1572,7 +1610,16 @@ class SonaraWorldModel:
             losses.append(self.model.compute_loss(
                 replay_events, replay_query, replay_answer, self.word_to_id, self.device
             ))
-        metrics = self._apply_verified_loss(torch.stack(losses).mean(), clip_norm)
+        total = torch.stack(losses).mean()
+        target = verified_answer.lower().strip()
+        if target and target not in CLOSED_TO_ID:
+            self.answer_words.add(target)
+        gate_loss = self.model.answer_gate_loss(
+            tokenize(" ".join(events) + " " + question), self.answer_words, self.device
+        )
+        if gate_loss is not None:
+            total = total + gate_loss
+        metrics = self._apply_verified_loss(total, clip_norm)
         bucket = self.replay_buckets[key]
         bucket.append((list(events), question, verified_answer))
         if len(bucket) > 8:
@@ -1687,6 +1734,7 @@ class SonaraWorldModel:
             "id_to_word": self.id_to_word,
             "trained_examples_count": self.trained_examples_count,
             "replay_buckets": dict(self.replay_buckets),
+            "answer_words": sorted(self.answer_words),
             "state_dict": self.model.state_dict(),
         }
         try:
@@ -1755,10 +1803,14 @@ class SonaraWorldModel:
                     or not all(isinstance(part, str) for part in example[1:])
                 ):
                     raise ValueError("Malformed verified replay example")
+        answer_words = payload.get("answer_words", [])
+        if not isinstance(answer_words, list) or not all(isinstance(w, str) for w in answer_words):
+            raise ValueError("Malformed checkpoint answer words")
         self.model.load_state_dict({**current, **old_state})
         self._sparse_training_updates = updates
         self.word_to_id = payload.get("word_to_id", self.word_to_id)
         self.id_to_word = payload.get("id_to_word", self.id_to_word)
         self.trained_examples_count = payload.get("trained_examples_count", 0)
         self.replay_buckets = defaultdict(list, restored)
+        self.answer_words = set(answer_words)
         self.model.eval()

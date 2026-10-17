@@ -238,11 +238,25 @@ class PretrainedLexiconTests(unittest.TestCase):
         self.assertFalse(torch.equal(before, wm.model.embedding.pretrained_proj.weight))
         self.assertIsNotNone(wm.model.sentence_proj)
 
+    def test_answer_gate_learns_from_verified_answers(self):
+        wm = self.make()
+        model = wm.model
+        def gate(word):
+            with torch.no_grad():
+                return float(torch.sigmoid(model._candidate_answer_logits([word], wm.device)))
+        before = (gate("pond"), gate("moved"))
+        for _ in range(30):
+            wm.learn_step(self.EVENTS, "where is the ball?", "pond")
+        self.assertEqual(wm.answer_words, {"pond"})
+        self.assertGreater(gate("pond"), before[0])
+        self.assertLess(gate("moved"), before[1])
+
     def test_checkpoint_requires_same_encoder(self):
         wm = self.make(checkpoint_path=self.path)
         wm.learn_step(self.EVENTS, "where is the ball?", "pond")
         wm.save_checkpoint()
         reloaded = self.make(checkpoint_path=self.path)
+        self.assertEqual(reloaded.answer_words, {"pond"})
         self.assertEqual(wm.predict("where is the ball?", events=self.EVENTS).answer,
                          reloaded.predict("where is the ball?", events=self.EVENTS).answer)
         other = FakeTextEncoder()

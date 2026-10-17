@@ -7,7 +7,7 @@
 
 **The fixes made the model worse.** The new design loses to the original on every test, by 14–23 points on three of the four. Extra training phrasings did not help the original design either. The original model still loses to the rule script on everything except reworded events. The live default stays as it was: `/ask` answers `UNKNOWN`, and the new design remains opt-in.
 
-**Follow-ups (below):** 3,000 steps did not close the gap, and a frozen Qwen encoder did worse on reworded events. Both new designs memorise which training words are not answers; the root cause is training data with too few phrasings.
+**Follow-ups (below):** 3,000 steps did not close the gap, and a frozen Qwen encoder did worse on reworded events; an answer gate cut its filler-word answers but not its role confusion. Both new designs memorise which training words are not answers; the root cause is training data with too few phrasings.
 
 ## Results (mean of 3 seeds; identical test stories for every system)
 
@@ -70,6 +70,20 @@ Error breakdown on B for retrained seed-1000 models:
 
 **Root cause: the training data, not the network.** 240 stories from 4 move templates cannot teach "what counts as a place" in general; any learner extracts the template's positional shortcut, which is what the rule script encodes by hand.
 
+## Follow-up 3: answer gate for the Qwen design
+
+A linear probe on each candidate word's frozen Qwen vector predicts whether the word can be an answer; its log-probability is added to the copy step's scores. It is trained only from words that were verified answers (`answer_words`, saved in checkpoints), with no word list.
+
+| System (900 steps) | A | B | C | D |
+|---|---:|---:|---:|---:|
+| Original | **84.5%** | **59.7%** | **33.3%** | **82.4%** |
+| Qwen encoder | 76.5% | 30.9% | 27.9% | 76.2% |
+| Qwen encoder + answer gate | 71.7% | 35.2% | 28.8% | 66.2% |
+
+**The gate fixed what it targeted, but not the score.** On B (seed 1000), filler-word answers fell from 34% to 13%. Those answers mostly became the *wrong entity* instead (wrong object 16%, wrong person 13%), not correct ones. Actor and object questions improved (B actor 16% → 31%, object 19% → 49%); location questions did not (current state 19% → 19%). A and D got worse.
+
+**The remaining failure is role confusion.** In "in the attic, emma set down the scarf", all three of attic, emma and scarf are valid answers to *some* question; the model has to know which one is the place. In training, roles always sit in the same positions (person first, object after the verb, place last), so it learned positions, not roles. That is the same training-data limit as above, and no gate can fix it.
+
 ## Next step
 
 Make the shortcut stop working in training: generate dozens of varied phrasings per event type (for example by paraphrasing training events with the local Qwen chat model), with answers in different positions and many different filler words, while keeping B and C held out. Retest the original and Qwen designs on that data before changing the architecture again.
@@ -84,4 +98,5 @@ python3 experiment_world_generalization.py --seeds 3 --steps 3000 --workers 6 \
 ollama pull qwen3-embedding:0.6b   # once; embeds ~18k texts on first run (~15 min)
 python3 experiment_world_generalization.py --seeds 3 --steps 900 --workers 2 \
     --systems pretrained --output artifacts/world_generalization_pretrained.json
+# (that run predates the answer gate; the same command now includes it)
 ```
