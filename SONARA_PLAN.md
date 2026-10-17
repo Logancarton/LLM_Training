@@ -1,6 +1,18 @@
 # Sonara: Experience Learner — Plan
 
-**Date:** 2026-10-17 · **Status:** plan only, nothing built yet
+**Date:** 2026-10-17 · **Status:** below. Nothing has been shown on real data yet (1 memory, 0 questions).
+
+| Feature | Built | Integrated | Enabled | Validated on real data |
+|---|---|---|---|---|
+| Memory store + Qwen vectors | yes | `chat` | yes | no |
+| Fixed baseline (tuned on train) | yes | `chat` answers from it | yes | no |
+| Sonara learner (online; clock + experience inputs) | yes | `curve` only | in `curve` | no (synthetic only) |
+| Top-1 target metric, recall@5 and `answer_ok` alongside | yes | `curve` | yes | no |
+| Incremental `newer_similar` (saved, linear per memory) | yes | Sonara inputs | yes | matches N x N in tests |
+| Saved learner state, replay on feature/code change | yes | not yet (change 2) | no | saved == replayed in tests |
+| Bounded candidate set (top 50 cosine + 10 newest), shared | yes | baseline, Sonara, `chat` | yes | no |
+| Shadow ranking in `chat` | no | | | |
+| Union labeling pool | no | | | |
 
 ## Goal
 

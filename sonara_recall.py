@@ -34,6 +34,7 @@ K = 5
 DEFAULT_PARAMS = {"weight": 0.1, "half_life": 7.0}
 GRID = {"weight": (0.0, 0.05, 0.1, 0.2, 0.4), "half_life": (1.0, 7.0, 30.0)}
 BIAS_GRID = (-0.4, -0.2, -0.1, 0.0, 0.1)
+POOL_COSINE, POOL_NEWEST = 50, 10  # the bounded candidate set every method ranks from
 
 
 def split_for(question_id: str) -> str:
@@ -117,10 +118,21 @@ class Store:
         return vecs @ q
 
 
+def candidates(store: Store, question: str, asked_epoch: float) -> List[Memory]:
+    """The bounded set every method ranks from: the top POOL_COSINE memories by cosine plus the
+    POOL_NEWEST newest, written before the question."""
+    mems = store.before(asked_epoch)
+    if len(mems) <= POOL_COSINE + POOL_NEWEST:
+        return mems
+    top = [mems[i] for i in store.similarities(question, mems).argsort(descending=True)[:POOL_COSINE].tolist()]
+    newest = sorted(mems, key=lambda m: m.timestamp_epoch, reverse=True)[:POOL_NEWEST]
+    return list({m.id: m for m in top + newest}.values())
+
+
 def baseline_scores(store: Store, question: str, asked_epoch: float,
                     params: Dict[str, float] = DEFAULT_PARAMS) -> Tuple[List[Memory], torch.Tensor]:
     """Fixed baseline: cosine similarity + weight * recency (relative to ask time) + source bias."""
-    mems = store.before(asked_epoch)
+    mems = candidates(store, question, asked_epoch)
     if not mems:
         return [], torch.zeros(0)
     age_days = torch.tensor([(asked_epoch - m.timestamp_epoch) / 86400 for m in mems])

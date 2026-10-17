@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 
 from sonara_memory import Memory
-from sonara_recall import DEFAULT_PARAMS, K, Store, baseline_rank, baseline_scores, hit, rank_by, tune
+from sonara_recall import DEFAULT_PARAMS, K, Store, baseline_rank, baseline_scores, candidates, hit, rank_by, tune
 
 SOURCES = ("user_note", "user_question", "qwen_answer", "qwen_follow_up")
 CLOCK = ["log_gap_seconds", "same_time_of_day", "same_day_of_week", "same_time_of_year",
@@ -58,18 +58,19 @@ def clock_inputs(store: Store, mems: Sequence[Memory], now: float) -> torch.Tens
     now_phase = torch.tensor(clock_phases(now))
     phases = torch.tensor([clock_phases(m.timestamp_epoch) for m in mems])
     x[:, 1:4] = torch.cos(2 * math.pi * (phases - now_phase))  # 1 = same point in the cycle
-    ordered = sorted(times.tolist()) + [now]
+    timeline = sorted(m.timestamp_epoch for m in store.before(now))  # sessions read the whole timeline
+    ordered = timeline + [now]
     starts = [b for a, b in zip(ordered, ordered[1:]) if b - a >= SESSION_GAP]
     x[:, 4] = torch.log1p(torch.tensor([len(starts) - bisect.bisect_right(starts, t) for t in times.tolist()],
                                        dtype=torch.float32))
     x[:, 5] = store.newer_similar(mems, now)
-    x[:, 6] = torch.log1p(times - times.min()).float()
+    x[:, 6] = torch.log1p(times - timeline[0]).float()
     return x
 
 
 def features(store: Store, question: str, asked_epoch: float,
              history: Sequence[Dict]) -> Tuple[List[Memory], torch.Tensor]:
-    mems = store.before(asked_epoch)
+    mems = candidates(store, question, asked_epoch)
     x = torch.zeros(len(mems), len(FEATURES))
     if not mems:
         return mems, x
@@ -197,7 +198,8 @@ def run(store: Store) -> List[Dict]:
                     "control": control.rank(store, q, history),
                     "sonara": sonara.rank(store, q, history),
                 }
-                r = {"q": q, "n_train": len(labeled), "sonara_top": ranked["sonara"][:K]}
+                r = {"q": q, "n_train": len(labeled), "sonara_top": ranked["sonara"][:K],
+                     "covered": any(m.id in q["correct_ids"] for m in candidates(store, q["question"], q["asked_epoch"]))}
                 for name, ranking in ranked.items():  # top-1 is the target; recall@5 alongside
                     r[name] = hit(ranking, q["correct_ids"], k=1)
                     r[name + "@5"] = hit(ranking, q["correct_ids"])
@@ -228,6 +230,8 @@ def report(store: Store) -> None:
             print(f" {end:%Y-%m-%d} | {chunk[-1]['n_train']:16} | {pct['baseline']:7.1f}% | {pct['rule']:5.1f}% | "
                   f"{pct['control']:6.1f}% | {pct['sonara']:5.1f}% | {pct['sonara'] - pct['baseline']:+11.1f} | "
                   f"{pct['sonara'] - pct['control']:+.1f}")
+    if results:
+        print(f"correct memory in the candidate set: {sum(r['covered'] for r in results)}/{len(results)}")
     judged = [r["q"]["answer_ok"] for r in results if r["q"].get("answer_ok") is not None]
     if judged:  # Qwen answered from the baseline's top 5, so this measures the baseline's answers
         print(f"answer_ok (baseline answered): {sum(judged)}/{len(judged)}")

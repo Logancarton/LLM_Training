@@ -5,7 +5,7 @@ import tempfile
 
 import torch
 
-from sonara_recall import Store, baseline_rank, hit, score, split_for, tune
+from sonara_recall import POOL_COSINE, POOL_NEWEST, Store, baseline_rank, candidates, hit, score, split_for, tune
 
 
 class FakeEncoder:
@@ -64,6 +64,13 @@ def test_recall():
         params = tune(store, train)
         assert params["bias:qwen_answer"] < 0
         assert hit(baseline_rank(store, "Jake liked what", 20 * day, params), [old.id])
+
+        # Every method ranks from a bounded set: the top memories by cosine plus the newest.
+        for i in range(70):
+            store.add(f"filler note {i}", "user_note").timestamp_epoch = 16 * day + i
+        pool = candidates(store, "what did Jake like", 20 * day)
+        assert len(pool) <= POOL_COSINE + POOL_NEWEST and old in pool
+        assert all(store.memory.memories[m.id] in pool for m in store.before(20 * day)[-POOL_NEWEST:])
     finally:
         shutil.rmtree(tmp)
     print("✓ recall tests passed")
