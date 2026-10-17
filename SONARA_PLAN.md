@@ -31,7 +31,7 @@ Qwen handles language: it reads text, turns it into vectors, and writes answers.
 
 ## Where experience comes from (decided 2026-10-17)
 
-Real use. You ask Qwen questions in `sonara_recall.py chat`. The baseline recalls memories, Qwen answers from them, and you mark which memories were actually useful. The question, the answer and any notes are stored as timestamped memories. Each verified question is assigned to train or eval when it is written (1 in 3 eval, by id hash), so the eval set is frozen and never trained on. Synthetic data is used only in tests.
+Real use. You ask Qwen questions in `sonara_recall.py chat`. The baseline recalls memories, Qwen answers from them, and you mark which memories were actually useful. After every answer Qwen is asked: what makes this true, what would make it not true, and what are the most relevant variables and how they relate to the question and answer. The question, the answer, that follow-up and any notes are stored as timestamped memories. Each verified question is assigned to train or eval when it is written (1 in 3 eval, by id hash), so the eval set is frozen and never trained on. Synthetic data is used only in tests.
 
 - **Labeling pool:** you label from 15 shuffled candidates (top 10 by similarity + 5 most recent), shown without scores, or by typing a memory id. Labels found this way favor what similarity and recency already surface, so Sonara can mostly win only by re-ranking within the pool. This is a known limit.
 - **Volume:** a 5-point gap needs roughly 150–300 eval questions to tell apart from noise, i.e. about 10 verified questions a day for several weeks.

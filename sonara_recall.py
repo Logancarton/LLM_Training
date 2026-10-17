@@ -126,18 +126,29 @@ def label_pool(store: Store, question: str, asked_epoch: float) -> List[Memory]:
     return pool
 
 
-def ask_qwen(question: str, mems: Sequence[Memory]) -> str:
+FOLLOW_UP = ("About your answer: 1) What makes this true? 2) What would make it not true? "
+             "3) What are the most relevant variables, and how do they relate to the question and the answer?")
+
+
+def _chat(messages: List[Dict]) -> str:
+    payload = json.dumps({"model": CHAT_MODEL, "messages": messages, "stream": False}).encode()
+    request = urllib.request.Request(CHAT_ENDPOINT, data=payload, headers={"Content-Type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=600) as response:
+        return json.load(response)["message"]["content"].strip()
+
+
+def ask_qwen(question: str, mems: Sequence[Memory]) -> Tuple[str, str]:
+    """Qwen's answer, then its reply to the fixed follow-up questions about that answer."""
     context = "\n".join(f"- ({m.timestamp_human}) {m.content}" for m in mems) or "(none)"
     messages = [
         {"role": "system", "content": "Answer the question. Use these memories when relevant; "
                                       "if they do not contain the answer, say so.\n" + context},
         {"role": "user", "content": question},
     ]
-    payload = json.dumps({"model": CHAT_MODEL, "messages": messages, "stream": False}).encode()
-    request = urllib.request.Request(CHAT_ENDPOINT, data=payload, headers={"Content-Type": "application/json"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=600) as response:
-        return json.load(response)["message"]["content"].strip()
+    answer = _chat(messages)
+    follow_up = _chat(messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": FOLLOW_UP}])
+    return answer, follow_up
 
 
 def chat(store: Store) -> None:
@@ -151,8 +162,8 @@ def chat(store: Store) -> None:
             print(f"[noted {mem.id}]")
             continue
         asked = time.time()
-        answer = ask_qwen(line, baseline_rank(store, line, asked)[:K])
-        print(f"\nqwen> {answer}\n")
+        answer, follow_up = ask_qwen(line, baseline_rank(store, line, asked)[:K])
+        print(f"\nqwen> {answer}\n\nqwen (follow-up)> {follow_up}\n")
         pool = label_pool(store, line, asked)
         for i, m in enumerate(pool, 1):
             print(f"  {i:2}. ({m.timestamp_human}) {m.content[:160]}")
@@ -162,6 +173,7 @@ def chat(store: Store) -> None:
         ok = input("Answer correct? [y/n/Enter=skip]: ").strip().lower()
         q_mem = store.add(line, source="user_question")
         store.add(answer, source="qwen_answer")
+        store.add(follow_up, source="qwen_follow_up")
         row = store.add_question(q_mem.id, line, asked, correct, [m.id for m in pool],
                                  {"y": True, "n": False}.get(ok))
         print(f"[logged {row['split']} question with {len(correct)} useful memories]")
