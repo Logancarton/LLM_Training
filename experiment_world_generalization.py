@@ -59,7 +59,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
-from sonara_world_model import SonaraWorldModel
+from sonara_text_encoder import PretrainedTextEncoder
+from sonara_world_model import SonaraWorldModel, tokenize
+
+EMBED_CACHE = Path("artifacts/qwen_text_cache.pt")
 
 # =====================================================================
 # 1. VOCABULARY AND TEMPLATES
@@ -549,9 +552,14 @@ def train_world_model(
     follows a cosine from 0.002 down to 0.0002 (recommendation 4)."""
     torch.manual_seed(seed)
     base_lr = 0.002
+    encoder = (
+        PretrainedTextEncoder(cache_path=EMBED_CACHE, offline=True)
+        if system["lexicon"] == "pretrained" else None
+    )
     wm = SonaraWorldModel(
         device="cpu", dim=64, lr=base_lr,
         lexicon=system["lexicon"], engineered_features=system["features"],
+        text_encoder=encoder,
     )
     if system["zero_features"]:
         ablate_engineered_features(wm)
@@ -630,6 +638,9 @@ NEURAL_SYSTEMS = {
     "learned_original_phrasing": _system(lexicon="learned", features=False, lr_decay=True),
     "learned_with_features": _system(lexicon="learned", features=True, variety="extended", lr_decay=True),
     "structural_extended_phrasing": _system(variety="extended", lr_decay=True),
+    # Experiment 4: the original design with only word/sentence reading swapped for a
+    # frozen local Qwen embedding model (qwen3-embedding:0.6b via Ollama).
+    "pretrained": _system(lexicon="pretrained"),
 }
 DEFAULT_SYSTEMS = ("world_model", "learned", "structural_extended_phrasing")
 
@@ -641,6 +652,28 @@ def build_val(seed: int, variety: str = "original", n: int = 30) -> List[Story]:
         generate_story(rng, TRAIN_ACTORS, TRAIN_OBJECTS, TRAIN_PLACES, "train", "train", variety=variety)
         for _ in range(n)
     ]
+
+
+def precompute_embeddings(seeds: List[int], systems: List[str], n_train: int, n_test: int) -> None:
+    """Embed every sentence and word the pretrained systems will see, once, so
+    workers run offline against identical cached vectors."""
+    varieties = {NEURAL_SYSTEMS[n]["variety"] for n in systems if NEURAL_SYSTEMS[n]["lexicon"] == "pretrained"}
+    if not varieties:
+        return
+    texts = set()
+    for seed in seeds:
+        for variety in varieties:
+            train, tests = build_splits(seed, n_train, n_test, variety=variety)
+            for story in train + build_val(seed, variety) + [s for v in tests.values() for s in v]:
+                for text in story.events + [q.question for q in story.questions]:
+                    texts.add(text)
+                    texts.update(tokenize(text))
+    encoder = PretrainedTextEncoder(cache_path=EMBED_CACHE)
+    t0 = time.monotonic()
+    fetched = encoder.ensure(texts)
+    encoder.save(EMBED_CACHE)
+    print(f"Embedding cache: {len(texts)} texts needed, {fetched} fetched in "
+          f"{time.monotonic() - t0:.0f}s -> {EMBED_CACHE}", flush=True)
 
 
 def run_neural_job(job: Tuple[int, str, int, int, int]) -> Tuple[int, str, Dict]:
@@ -735,6 +768,7 @@ def main() -> None:
         train, _ = build_splits(s, args.train_stories, args.test_stories)
         runs.append({"seed": s, "n_train_questions": sum(len(x.questions) for x in train),
                      "systems": run_baselines(s, args.train_stories, args.test_stories)})
+    precompute_embeddings(seeds, systems, args.train_stories, args.test_stories)
     jobs = [(s, name, args.steps, args.train_stories, args.test_stories) for s in seeds for name in systems]
     by_seed = {r["seed"]: r for r in runs}
     partial = Path(args.output).with_suffix(".partial.json")

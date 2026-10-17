@@ -116,7 +116,8 @@ class CharSubwordEmbedding(nn.Module):
         vocab_size: int = 512,
         hash_buckets: int = 1024,
         dim: int = 64,
-        learned_lexicon: bool = False,
+        lexicon: str = "structural",
+        text_encoder: Optional[Any] = None,
     ):
         super().__init__()
         self.dim = dim
@@ -134,10 +135,19 @@ class CharSubwordEmbedding(nn.Module):
         # whether a token acts as an entity (for identity matching) is a learned
         # gate rather than membership in the fixed STRUCTURAL_WORDS list. Words
         # never seen in a training step fall back to <unk> + character n-grams.
-        self.learned_lexicon = learned_lexicon
+        # Pretrained lexicon: each word's meaning comes from a frozen local text
+        # encoder (see sonara_text_encoder.py) through a trainable projection.
+        self.lexicon = lexicon
+        self.learned_lexicon = lexicon == "learned"
+        self.text_encoder = text_encoder
         self._dropped_words: frozenset = frozenset()
-        if learned_lexicon:
+        if lexicon == "learned":
             self.register_buffer("word_trained", torch.zeros(vocab_size, dtype=torch.bool))
+        if lexicon == "pretrained":
+            if text_encoder is None:
+                raise ValueError("Pretrained lexicon requires a text_encoder")
+            self.pretrained_proj = nn.Linear(text_encoder.vector_dim(), dim)
+        if lexicon in ("learned", "pretrained"):
             self.entity_gate = nn.Sequential(
                 nn.Linear(dim, dim // 2), nn.Tanh(), nn.Linear(dim // 2, 1)
             )
@@ -252,6 +262,10 @@ class CharSubwordEmbedding(nn.Module):
         """Embed a sequence of tokens into a (seq_len, dim) tensor."""
         if not token_strings:
             return torch.zeros(1, self.dim, device=device)
+        if self.lexicon == "pretrained":
+            w_vecs = self.pretrained_proj(self.text_encoder.vectors(token_strings).to(device))
+            char_vecs = self.embed_char_only(token_strings, device)
+            return self.norm(self.projection(torch.cat([w_vecs, char_vecs], dim=-1)))
         eff_ids, scales = self._effective_ids(token_strings, word_ids)
         w_tensor = torch.tensor(eff_ids, dtype=torch.long, device=device)
         w_vecs = self.word_embeddings(w_tensor)  # (L, dim)
@@ -723,14 +737,17 @@ class NeuralWorldModel(nn.Module):
         lexicon: str = "structural",
         engineered_features: bool = True,
         word_dropout: float = 0.2,
+        text_encoder: Optional[Any] = None,
     ):
         """lexicon="structural" keeps the original fixed STRUCTURAL_WORDS vocabulary;
-        "learned" gives every training word an embedding and learns the entity gate.
+        "learned" gives every training word an embedding and learns the entity gate;
+        "pretrained" reads every word and sentence through a frozen local text encoder
+        (text_encoder, e.g. sonara_text_encoder.PretrainedTextEncoder) plus the gate.
         engineered_features=False drops the hand-computed progression features
         (latest/earliest mention, before-anchor, left/right tau) and lets the
         reasoner score events from recurrent world states instead."""
         super().__init__()
-        if lexicon not in ("structural", "learned"):
+        if lexicon not in ("structural", "learned", "pretrained"):
             raise ValueError(f"Unknown lexicon: {lexicon}")
         self.dim = dim
         self.lexicon = lexicon
@@ -740,7 +757,11 @@ class NeuralWorldModel(nn.Module):
         self.word_dropout = word_dropout if lexicon == "learned" else 0.0
         self.embedding = CharSubwordEmbedding(
             vocab_size=vocab_size, hash_buckets=hash_buckets, dim=dim,
-            learned_lexicon=(lexicon == "learned"),
+            lexicon=lexicon, text_encoder=text_encoder,
+        )
+        # Frozen whole-sentence meaning for each event and the question.
+        self.sentence_proj = (
+            nn.Linear(text_encoder.vector_dim(), dim) if lexicon == "pretrained" else None
         )
         self.temporal_encoding = TemporalEncoding(dim=dim, max_steps=max_events)
         self.event_encoder = EventEncoder(self.embedding, dim=dim)
@@ -806,8 +827,8 @@ class NeuralWorldModel(nn.Module):
         query_tokens = tokenize(query)
         tokenized_events, candidates, candidate_indices = self._prepare_events(events)
         cand_to_idx = {c: idx for idx, c in enumerate(candidates)}
-        learned = self.lexicon == "learned"
-        if learned and self.training and self.word_dropout > 0:
+        learned = self.lexicon in ("learned", "pretrained")
+        if self.lexicon == "learned" and self.training and self.word_dropout > 0:
             # One decision per word for the whole episode, so a hidden name is
             # hidden consistently in every event and in the question.
             words = sorted({t for toks in tokenized_events for t in toks} | set(query_tokens))
@@ -889,6 +910,11 @@ class NeuralWorldModel(nn.Module):
             aligned_vecs=q_time_vecs,
             match_scalars=q_scalars,
         )
+        if self.sentence_proj is not None:
+            sent_vecs = self.sentence_proj(
+                self.embedding.text_encoder.vectors([query] + list(events)).to(device)
+            )
+            q_vec = q_vec + sent_vecs[0]
 
         # Compute left-vs-right matched temporal progression across query tokens (for event order)
         left_w = (1.0 - q_pos) * (q_uniq ** 2)
@@ -962,6 +988,8 @@ class NeuralWorldModel(nn.Module):
                 aligned_vecs=u_aligned,
                 match_scalars=ev_scalars,
             )
+            if self.sentence_proj is not None:
+                ev_vec = ev_vec + sent_vecs[t + 1]
             encoded_events.append(ev_vec + t_vecs[t])
             tok_h_list.append(tok_h)
             ev_scalars_list.append(ev_scalars)
@@ -1257,6 +1285,7 @@ class SonaraWorldModel:
         lr: float = 0.002,
         lexicon: str = "structural",
         engineered_features: bool = True,
+        text_encoder: Optional[Any] = None,
     ):
         self.device = self._select_device(device)
         self.dim = dim
@@ -1266,7 +1295,8 @@ class SonaraWorldModel:
         self.word_to_id: Dict[str, int] = dict(CLOSED_TO_ID)
         self.id_to_word: Dict[int, str] = dict(ID_TO_CLOSED)
         self.model = NeuralWorldModel(
-            dim=dim, lexicon=lexicon, engineered_features=engineered_features
+            dim=dim, lexicon=lexicon, engineered_features=engineered_features,
+            text_encoder=self._default_encoder(lexicon, text_encoder),
         ).to(self.device)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
 
@@ -1291,6 +1321,13 @@ class SonaraWorldModel:
 
         if self.checkpoint_path and self.checkpoint_path.exists():
             self.load_checkpoint(self.checkpoint_path)
+
+    @staticmethod
+    def _default_encoder(lexicon: str, text_encoder: Optional[Any]) -> Optional[Any]:
+        if lexicon != "pretrained" or text_encoder is not None:
+            return text_encoder
+        from sonara_text_encoder import PretrainedTextEncoder
+        return PretrainedTextEncoder()
 
     def _select_device(self, val: str) -> torch.device:
         if val != "auto":
@@ -1644,6 +1681,7 @@ class SonaraWorldModel:
                 "dim": self.dim, "family": "temporal_hierarchical",
                 "lexicon": self.model.lexicon,
                 "engineered_features": self.model.engineered_features,
+                "text_encoder": getattr(self.model.embedding.text_encoder, "model", None),
             },
             "word_to_id": self.word_to_id,
             "id_to_word": self.id_to_word,
@@ -1677,10 +1715,11 @@ class SonaraWorldModel:
         if (
             arch.get("lexicon", "structural") != self.model.lexicon
             or arch.get("engineered_features", True) != self.model.engineered_features
+            or arch.get("text_encoder") != getattr(self.model.embedding.text_encoder, "model", None)
         ):
             raise ValueError(
                 "World-model checkpoint lexicon/feature design differs from this owner; "
-                "construct SonaraWorldModel with the matching lexicon and engineered_features"
+                "construct SonaraWorldModel with the matching lexicon, features and text encoder"
             )
         old_state = payload["state_dict"]
         current = self.model.state_dict()

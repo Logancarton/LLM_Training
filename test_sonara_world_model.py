@@ -201,5 +201,55 @@ class LearnedLexiconTests(unittest.TestCase):
             SonaraWorldModel(checkpoint_path=self.path, device="cpu", dim=32)
 
 
+class FakeTextEncoder:
+    """Deterministic stand-in for PretrainedTextEncoder (CI has no Ollama)."""
+    model = "fake-embed"
+
+    def vector_dim(self):
+        return 16
+
+    def vectors(self, texts):
+        return torch.stack([
+            torch.randn(16, generator=torch.Generator().manual_seed(sum(map(ord, t)) + len(t)))
+            for t in texts
+        ])
+
+
+class PretrainedLexiconTests(unittest.TestCase):
+    EVENTS = LearnedLexiconTests.EVENTS
+
+    def setUp(self):
+        torch.manual_seed(3)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp_dir.name) / "pretrained.pt"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def make(self, encoder=None, **kw):
+        return SonaraWorldModel(device="cpu", dim=32, lr=0.01, lexicon="pretrained",
+                                text_encoder=encoder or FakeTextEncoder(), **kw)
+
+    def test_projection_learns_and_loss_falls(self):
+        wm = self.make()
+        before = wm.model.embedding.pretrained_proj.weight.detach().clone()
+        losses = [wm.learn_step(self.EVENTS, "where is the ball?", "pond")["loss"] for _ in range(15)]
+        self.assertLess(losses[-1], losses[0])
+        self.assertFalse(torch.equal(before, wm.model.embedding.pretrained_proj.weight))
+        self.assertIsNotNone(wm.model.sentence_proj)
+
+    def test_checkpoint_requires_same_encoder(self):
+        wm = self.make(checkpoint_path=self.path)
+        wm.learn_step(self.EVENTS, "where is the ball?", "pond")
+        wm.save_checkpoint()
+        reloaded = self.make(checkpoint_path=self.path)
+        self.assertEqual(wm.predict("where is the ball?", events=self.EVENTS).answer,
+                         reloaded.predict("where is the ball?", events=self.EVENTS).answer)
+        other = FakeTextEncoder()
+        other.model = "different-embed"
+        with self.assertRaises(ValueError):
+            self.make(encoder=other, checkpoint_path=self.path)
+
+
 if __name__ == "__main__":
     unittest.main()

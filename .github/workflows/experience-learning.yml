@@ -13,6 +13,7 @@ on:
       - sonara_memory.py
       - sonara_research.py
       - sonara_world_model.py
+      - sonara_text_encoder.py
       - test_sonara_world_model.py
       - test_live_boundaries.py
       - sonara_adaptive.py
@@ -39,6 +40,7 @@ on:
       - sonara_memory.py
       - sonara_research.py
       - sonara_world_model.py
+      - sonara_text_encoder.py
       - test_sonara_world_model.py
       - test_live_boundaries.py
       - sonara_adaptive.py
@@ -73,7 +75,7 @@ jobs:
       - name: Install CPU PyTorch
         run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Compile
-        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py test_sonara_world_model.py test_live_boundaries.py sonara_adaptive.py test_sonara_adaptive.py experiment_causal_loop.py test_causal_loop.py experiment_experience_learning.py experiment_world_learning.py experiment_processing_efficiency.py experiment_replay_budget.py test_world_efficiency.py experiment_sparse_cognition.py test_sparse_cognition.py
+        run: python -m py_compile LLM_Training.py sonara_memory.py sonara_research.py sonara_world_model.py sonara_text_encoder.py test_sonara_world_model.py test_live_boundaries.py sonara_adaptive.py test_sonara_adaptive.py experiment_causal_loop.py test_causal_loop.py experiment_experience_learning.py experiment_world_learning.py experiment_processing_efficiency.py experiment_replay_budget.py test_world_efficiency.py experiment_sparse_cognition.py test_sparse_cognition.py
       - name: Existing mechanism regression
         run: |
           python LLM_Training.py --mode self-test
