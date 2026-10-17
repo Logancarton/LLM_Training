@@ -16,7 +16,7 @@ FEATURES
     - Entity indexing for fast multi-hop or associative recall.
     - No automatic reflection or promotion of lexical repetition into knowledge.
     - Persistent storage: Append-only JSONL log + Human-readable Markdown Journal.
-    - Interactive CLI and drop-in integration with LLM_Training.py sessions.
+    - Interactive CLI.
 """
 
 import os
