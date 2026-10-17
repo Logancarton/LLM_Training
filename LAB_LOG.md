@@ -22,3 +22,10 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Data:** Run 1's 20 questions, split by id hash into 14 train and 6 eval.
 - **Result:** train recall@5 went from 11/14 (default) to 14/14 (tuned). Eval stayed at 5/6 either way. Tuning set the recency weight to 0 and left every source bias at 0. Removing recency alone fixed all train misses, so the source biases were never needed.
 - **Wrong answers:** the one eval miss is "When is my sibling coming to visit?" The top 5 is Qwen's earlier sister/Denver question, answer and follow-up, plus the dentist question. This is a similarity problem, not recency, and no source bias was learned to fix it. The recency result partly comes from the test itself: the notes were back-dated by days while the chat memories were minutes old. In real use, notes and chats are interleaved in time.
+
+## 2026-10-17 · Run 3: Sonara v1 sanity run on Run 1 data
+
+- **Changed:** first Sonara v1 run (linear scorer, 9 inputs, 5 seeds), with the feedback-rule reference. The pools were rebuilt with `label_pool`, because Run 1 didn't record them.
+- **Data:** Run 1's 20 questions: 14 train, 6 eval, no time split. This checks the code only; with this little data the numbers say nothing.
+- **Result:** at every training size, the baseline got 5/6, the rule got 5/6 (bonus tuned to 0), and Sonara got 6/6 (sd 0). The gap is one question.
+- **Wrong answers / why:** Sonara's win comes from source weights (note +4.4, generated sources about −4), not from experience. Its experience weights are negative (neighbor vote −4.6, useful count −4.8), because every question here is on a new topic, so a memory's past usefulness doesn't predict future usefulness. The baseline can apply source biases too, but its tuner maximizes hit counts and stops on ties: recency weight 0 already got train to 14/14, so it never tried the biases. Sonara's gradient on the full pool did find them. **That is a difference in optimizer strength, not in experience.** The next change should be one control that isolates experience: the same learner with the three experience inputs zeroed.

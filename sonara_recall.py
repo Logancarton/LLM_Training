@@ -81,17 +81,25 @@ class Store:
         return vecs @ q
 
 
-def baseline_rank(store: Store, question: str, asked_epoch: float,
-                  params: Dict[str, float] = DEFAULT_PARAMS) -> List[Memory]:
+def baseline_scores(store: Store, question: str, asked_epoch: float,
+                    params: Dict[str, float] = DEFAULT_PARAMS) -> Tuple[List[Memory], torch.Tensor]:
     """Fixed baseline: cosine similarity + weight * recency (relative to ask time) + source bias."""
     mems = store.before(asked_epoch)
     if not mems:
-        return []
+        return [], torch.zeros(0)
     age_days = torch.tensor([(asked_epoch - m.timestamp_epoch) / 86400 for m in mems])
     recency = torch.exp(-math.log(2) * age_days / params["half_life"])
     bias = torch.tensor([params.get("bias:" + m.source, 0.0) for m in mems])
-    scores = store.similarities(question, mems) + params["weight"] * recency + bias
+    return mems, store.similarities(question, mems) + params["weight"] * recency + bias
+
+
+def rank_by(mems: Sequence[Memory], scores: torch.Tensor) -> List[Memory]:
     return [mems[i] for i in scores.argsort(descending=True).tolist()]
+
+
+def baseline_rank(store: Store, question: str, asked_epoch: float,
+                  params: Dict[str, float] = DEFAULT_PARAMS) -> List[Memory]:
+    return rank_by(*baseline_scores(store, question, asked_epoch, params))
 
 
 def hit(ranked: Sequence[Memory], correct_ids: Sequence[str], k: int = K) -> bool:
