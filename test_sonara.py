@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from sonara import CLOCK, FEATURES, STATE_FILE, VOTE, clock_inputs, features, load_learner, run
-from sonara_recall import Store, split_for
+from sonara_recall import DEFAULT_PARAMS, TUNE_EVERY, Store, split_for
 
 
 def test_clock():
@@ -111,31 +111,51 @@ def test_shadow_chat():
     import io
     import sonara_recall
     tmp = tempfile.mkdtemp()
-    real_input, real_ask = builtins.input, sonara_recall.ask_qwen
+    real_input, real_ask, real_tune, real_split = (builtins.input, sonara_recall.ask_qwen, sonara_recall.tune,
+                                                   sonara_recall.split_for)
     try:
         store = Store(tmp, encoder=FakeEncoder())
-        for t in ("spare key under the blue flowerpot", "car parked on level 3", "bike in the shed"):
-            store.add(t, "user_note").timestamp_epoch = 0.0
-        sonara_recall.ask_qwen = lambda question, mems: ("an answer", "a follow-up")
-        replies = iter([x for i in range(8) for x in (f"where is the key {i}", "1 2", "")] + [""])
+        notes = [store.add(t, "user_note") for t in
+                 ("spare key under the blue flowerpot", "car parked on level 3", "bike in the shed")]
+        for m in notes:
+            m.timestamp_epoch = 0.0
+        # Qwen's stored answers resemble the question and crowd the key note out of the top 5.
+        sonara_recall.ask_qwen = lambda question, mems: ("where is the key: not sure", "where is the key, maybe")
+        replies = iter([x for i in range(20) for x in (f"where is the key {i}", notes[0].id, "")] + [""])
         builtins.input = lambda prompt="": next(replies)
+        tuned_on = []  # the tuner itself is tested in test_sonara_recall; here, when chat calls it
+        def fake_tune(store, train):
+            tuned_on.append(len(train))
+            return {"weight": 0.0, "half_life": 7.0, "bias:user_note": 1.0} if train else dict(DEFAULT_PARAMS)
+        sonara_recall.tune = fake_tune
+        asked = []  # memory ids are random, so fix the split here: every third question is eval
+        sonara_recall.split_for = lambda qid: asked.append(qid) or ("eval" if len(asked) % 3 == 0 else "train")
         with contextlib.redirect_stdout(io.StringIO()):
             sonara_recall.chat(store)
         rows = store.questions()
-        assert len(rows) == 8 and {r["split"] for r in rows} == {"train", "eval"}
+        assert len(rows) == 20 and {r["split"] for r in rows} == {"train", "eval"}
         assert all(r["rankings"]["baseline"] and r["rankings"]["sonara"] for r in rows)
         assert all(set(r["proposed_by"]) == set(r["candidate_ids"]) for r in rows)
         assert all(set(r["rankings"]["sonara"][:5]) <= set(r["candidate_ids"]) for r in rows)
         state = torch.load(store.dir / STATE_FILE)
         assert state["learned"] == [r["id"] for r in rows if r["split"] == "train"]  # never eval
 
+        # The answering baseline is tuned like curve's: at start, then every 10 labeled train questions.
+        train = [r for r in rows if r["split"] == "train"]
+        assert tuned_on == [0] + [TUNE_EVERY * k for k in range(1, len(train) // TUNE_EVERY + 1)]
+        i = rows.index(train[TUNE_EVERY - 1])
+        assert rows[i]["rankings"]["baseline"][0] != notes[0].id  # default settings: crowded out
+        assert rows[i + 1]["rankings"]["baseline"][0] == notes[0].id  # re-tuned settings answer next
+
+        sonara_recall.split_for = real_split
         eval_id = next(f"e{i}" for i in range(99) if split_for(f"e{i}") == "eval")
         weight = load_learner(store).model.weight.clone()
         store.add_question(eval_id, "where is the key", 1e12, rows[0]["correct_ids"], rows[0]["candidate_ids"], None)
         assert torch.equal(load_learner(store).model.weight, weight)  # a labeled eval question teaches nothing
         assert torch.load(store.dir / STATE_FILE)["learned"] == state["learned"]
     finally:
-        builtins.input, sonara_recall.ask_qwen = real_input, real_ask
+        builtins.input, sonara_recall.ask_qwen, sonara_recall.tune, sonara_recall.split_for = (
+            real_input, real_ask, real_tune, real_split)
         shutil.rmtree(tmp)
     print("✓ shadow chat tests passed")
 

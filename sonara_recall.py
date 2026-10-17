@@ -34,6 +34,7 @@ K = 5
 DEFAULT_PARAMS = {"weight": 0.1, "half_life": 7.0}
 GRID = {"weight": (0.0, 0.05, 0.1, 0.2, 0.4), "half_life": (1.0, 7.0, 30.0)}
 BIAS_GRID = (-0.4, -0.2, -0.1, 0.0, 0.1)
+TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
 POOL_COSINE, POOL_NEWEST = 50, 10  # the bounded candidate set every method ranks from
 
 
@@ -178,6 +179,14 @@ def tune(store: Store, train: List[Dict]) -> Dict[str, float]:
     return params
 
 
+def live_params(store: Store) -> Dict[str, float]:
+    """The baseline's settings as `sonara.py curve` has them now: tuned on the labeled train
+    questions so far, re-tuned every TUNE_EVERY of them."""
+    labeled = sorted((q for q in store.questions() if q["split"] == "train" and q["correct_ids"]),
+                     key=lambda q: q["asked_epoch"])
+    return tune(store, labeled[:len(labeled) // TUNE_EVERY * TUNE_EVERY])
+
+
 def score(store: Store, split_epoch: Optional[float] = None):
     """Recall@5 of the tuned baseline on eval questions asked at or after the split."""
     labeled = [q for q in store.questions() if q["correct_ids"]]
@@ -230,10 +239,10 @@ def ask_qwen(question: str, mems: Sequence[Memory]) -> Tuple[str, str]:
 
 
 def chat(store: Store) -> None:
-    """The baseline answers; Sonara ranks alongside it in shadow, and both full rankings are
+    """The tuned baseline answers; Sonara ranks alongside it in shadow, and both full rankings are
     logged. Sonara learns live only from train-split questions (load_learner skips eval)."""
     from sonara import load_learner  # sonara.py owns learning; imported here to avoid a cycle
-    sonara = load_learner(store)
+    sonara, params = load_learner(store), live_params(store)
     print("Ask a question, or '/note <text>' to store a note. Empty line quits.")
     while True:
         line = input("\nyou> ").strip()
@@ -244,7 +253,7 @@ def chat(store: Store) -> None:
             print(f"[noted {mem.id}]")
             continue
         asked = time.time()
-        baseline = baseline_rank(store, line, asked)
+        baseline = baseline_rank(store, line, asked, params)
         history = [q for q in store.questions() if q["split"] == "train"]
         shadow = sonara.rank(store, {"question": line, "asked_epoch": asked}, history)
         answer, follow_up = ask_qwen(line, baseline[:K])
@@ -265,6 +274,8 @@ def chat(store: Store) -> None:
                                  proposed)
         if row["split"] == "train":
             sonara = load_learner(store)
+            if correct and sum(q["split"] == "train" and bool(q["correct_ids"]) for q in store.questions()) % TUNE_EVERY == 0:
+                params = live_params(store)
         print(f"[logged {row['split']} question with {len(correct)} useful memories]")
 
 

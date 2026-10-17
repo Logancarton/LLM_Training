@@ -23,7 +23,8 @@ import torch
 import torch.nn.functional as F
 
 from sonara_memory import Memory
-from sonara_recall import DEFAULT_PARAMS, K, Store, baseline_rank, baseline_scores, candidates, hit, rank_by, tune
+from sonara_recall import (DEFAULT_PARAMS, K, TUNE_EVERY, Store, baseline_rank, baseline_scores, candidates, hit,
+                           rank_by, tune)
 
 SOURCES = ("user_note", "user_question", "qwen_answer", "qwen_follow_up")
 CLOCK = ["log_gap_seconds", "same_time_of_day", "same_day_of_week", "same_time_of_year",
@@ -36,7 +37,6 @@ SESSION_GAP = 3600.0  # a quiet hour or more starts a new session
 PERIODS = 4
 LR = 0.01
 STEPS = 10  # learning steps per verified question
-TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
 RULE_GRID = (0.1, 0.2, 0.4, 0.8)
 METHODS = ("baseline", "rule", "control", "sonara")
 STATE_FILE = "sonara_state.pt"
