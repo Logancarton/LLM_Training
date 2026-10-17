@@ -623,6 +623,44 @@ class WorldPrediction:
     attended_events: List[float]
 
 
+
+class LearnedSparseActivation(nn.Module):
+    """Lightweight learned evidence ranker inside the existing neural world model.
+
+    Rank on trainable subword-derived event vectors before running the expensive
+    recurrent reasoning path. Gradients for this auxiliary objective update the
+    ranker, not the shared world encoder: verified world learning stays in charge.
+    This is a derived view over original observations, never a memory store.
+    """
+    def __init__(self, dim: int):
+        super().__init__()
+        self.query_project = nn.Linear(dim, dim)
+        self.event_project = nn.Linear(dim, dim)
+        self.score = nn.Sequential(
+            nn.Linear(dim * 3, dim), nn.Tanh(), nn.Linear(dim, 1)
+        )
+
+    def forward(
+        self, embedding: CharSubwordEmbedding, events: Sequence[str],
+        question: str, device: torch.device,
+    ) -> torch.Tensor:
+        if not events:
+            return torch.empty(0, device=device)
+        # Recompute dependent features after every weight change. Only
+        # tokenization/ngram indices can use the existing bounded caches.
+        with torch.no_grad():
+            q_tokens = tokenize(question)
+            q_vec = embedding.embed_char_only(q_tokens, device).mean(dim=0)
+            event_vecs = torch.stack([
+                embedding.embed_char_only(tokenize(event), device).mean(dim=0)
+                for event in events
+            ])
+        query = self.query_project(q_vec.detach())
+        keys = self.event_project(event_vecs.detach())
+        qs = query.unsqueeze(0).expand_as(keys)
+        return self.score(torch.cat([qs, keys, qs * keys], dim=-1)).squeeze(-1)
+
+
 class NeuralWorldModel(nn.Module):
     """
     End-to-end trainable neural World Model for Sonara.
@@ -642,6 +680,7 @@ class NeuralWorldModel(nn.Module):
         self.tracker = WorldStateTracker(dim=dim)
         self.reasoner = WorldReasoningCore(dim=dim)
         self.head = PointerGeneratorHead(dim=dim)
+        self.sparse_selector = LearnedSparseActivation(dim=dim)
         # Cache only weight-independent tokenization and candidate positions,
         # never gradient-bearing neural states or authoritative memory.
         self._event_plan_cache: OrderedDict = OrderedDict()
@@ -1139,6 +1178,11 @@ class SonaraWorldModel:
         self._session_event_terms: List[frozenset[str]] = []
         # Sparse selection is experimental: do not silently omit unresolved causal history.
         self._sparse_session_activation = False
+        self._learned_sparse_activation = False  # research opt-in; never auto-enable on reload
+        self._sparse_training_updates = 0
+        self._sparse_recovery_limit = 32
+        self._sparse_min_confidence = 0.35
+        self.last_sparse_trace: Dict[str, Any] = {}
         self._max_active_events = 24
         self.trained_examples_count: int = 0
         self.enabled: bool = False
@@ -1177,6 +1221,7 @@ class SonaraWorldModel:
         self.session_events.clear()
         self._session_event_terms.clear()
         self.active_expectations.clear()
+        self.last_sparse_trace = {}
         # These caches hold only derived text features, not learned weights.
         # Explicit session reset must not retain stale episode contents.
         self.model._event_plan_cache.clear()
@@ -1210,9 +1255,133 @@ class SonaraWorldModel:
                 return history
         return [history[i] for i in sorted(selected)]
 
-    def predict(self, question: str, events: Optional[List[str]] = None) -> WorldPrediction:
-        """Predict from evidence; selectively activate only long live histories."""
+
+    def train_sparse_attention(
+        self, events: List[str], question: str, verified_answer: str,
+        *, steps: int = 3,
+    ) -> Dict[str, Any]:
+        """Train retrieval using *verified* answer-loss event ablations.
+
+        No distillation target is accepted merely because the full-context
+        model predicted it. If removing an observation makes the verified
+        outcome harder to explain, its measured loss increase is a training
+        target. Expensive ablations are deliberately capped at 32 events.
+        """
+        if not question.strip() or not verified_answer.strip() or not 1 <= steps <= 16:
+            raise ValueError("Nonempty verified example and 1..16 selector steps required")
+        if not 2 <= len(events) <= 32:
+            return {"trained": False, "reason": "teacher_ablation_limit"}
+        target = verified_answer.lower().strip()
+        if target not in CLOSED_TO_ID and target not in extract_content_candidates(events):
+            return {"trained": False, "reason": "answer_not_grounded_in_evidence"}
         self.model.eval()
+        with torch.no_grad():
+            full_loss = float(self.model.compute_loss(
+                events, question, verified_answer, self.word_to_id, self.device
+            ).item())
+            gains = []
+            for i in range(len(events)):
+                without = events[:i] + events[i + 1:]
+                if target not in CLOSED_TO_ID and target not in extract_content_candidates(without):
+                    # Removing the sole original answer token destroys grounded
+                    # pointer support, even if the model's unknown prior is high.
+                    gain = 2.0
+                else:
+                    altered = float(self.model.compute_loss(
+                        without, question, verified_answer, self.word_to_id, self.device
+                    ).item())
+                    gain = max(0.0, altered - full_loss)
+                gains.append(gain)
+        if sum(gains) <= 1e-7:
+            return {"trained": False, "reason": "no_verified_positive_influence"}
+        targets = torch.tensor(gains, dtype=torch.float32, device=self.device)
+        targets = targets / targets.sum()
+        before = [p.detach().clone() for p in self.model.sparse_selector.parameters()]
+        first_loss = None
+        self.model.sparse_selector.train()
+        for _ in range(steps):
+            scores = self.model.sparse_selector(
+                self.model.embedding, events, question, self.device
+            )
+            loss = -(targets * F.log_softmax(scores, dim=0)).sum()
+            if first_loss is None:
+                first_loss = float(loss.detach().item())
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.sparse_selector.parameters(), 1.0)
+            self.optimizer.step()
+            self._sparse_training_updates += 1
+        delta = sum(
+            float((p.detach() - old).abs().sum().item())
+            for p, old in zip(self.model.sparse_selector.parameters(), before)
+        )
+        self.model.eval()
+        return {
+            "trained": True, "updates": steps, "parameter_delta": round(delta, 6),
+            "initial_loss": round(first_loss, 4), "final_loss": round(float(loss.item()), 4),
+            "positive_influences": sum(value > 0 for value in gains),
+        }
+
+    def _rank_learned_events(
+        self, history: List[str], question: str, budget: int,
+    ) -> List[int]:
+        with torch.no_grad():
+            scores = self.model.sparse_selector(
+                self.model.embedding, history, question, self.device
+            )
+            # Indices refer to the ORIGINAL episode. Preserve chronology for
+            # the recurrent state tracker even when ranking is nonchronological.
+            chosen = torch.topk(scores, k=min(max(1, budget), len(history))).indices
+            return sorted(chosen.detach().cpu().tolist())
+
+    def predict(self, question: str, events: Optional[List[str]] = None) -> WorldPrediction:
+        """Opt-in learned sparse path with bounded uncertainty-based recovery."""
+        self.model.eval()
+        self.last_sparse_trace = {}
+        history = self.session_events
+        if (
+            events is None and self._learned_sparse_activation
+            and self._sparse_training_updates > 0
+            and len(history) > self._max_active_events
+        ):
+            initial = self._rank_learned_events(history, question, self._max_active_events)
+            with torch.no_grad():
+                _, pred = self.model(
+                    [history[i] for i in initial], question, self.word_to_id, self.device
+                )
+            used = initial
+            recovered = False
+            insufficient = pred.answer == "unknown" or pred.confidence < self._sparse_min_confidence
+            if insufficient:
+                # One bounded recovery pass. No open-ended history scan or
+                # silent claim that a high-confidence omission is detectable.
+                expanded_budget = min(
+                    len(history), self._sparse_recovery_limit,
+                    max(len(initial) + 1, 2 * self._max_active_events)
+                )
+                if expanded_budget > len(initial):
+                    used = self._rank_learned_events(history, question, expanded_budget)
+                    with torch.no_grad():
+                        _, pred = self.model(
+                            [history[i] for i in used], question, self.word_to_id, self.device
+                        )
+                    recovered = True
+                insufficient = pred.answer == "unknown" or pred.confidence < self._sparse_min_confidence
+            self.last_sparse_trace = {
+                "total_events": len(history), "activated_events": len(used),
+                "indices": used, "recovered": recovered,
+                "unresolved": insufficient, "sparse": True,
+            }
+            if insufficient:
+                # A distribution is a prediction, not evidence that the
+                # omitted causal context was recovered. Abstain explicitly.
+                return WorldPrediction(
+                    answer="unknown", confidence=pred.confidence,
+                    uncertainty=pred.uncertainty, p_gen=pred.p_gen,
+                    distribution=pred.distribution,
+                    attended_events=pred.attended_events,
+                )
+            return pred
         evs = events if events is not None else self._activate_session_events(question)
         with torch.no_grad():
             _, pred = self.model(evs, question, self.word_to_id, self.device)
@@ -1275,6 +1444,10 @@ class SonaraWorldModel:
             del self.replay_buckets[oldest]
         metrics["loss"] = round(float(primary_loss.detach().item()), 4)
         metrics["replay_examples"] = len(losses) - 1
+        if self._learned_sparse_activation:
+            metrics["sparse_attention"] = self.train_sparse_attention(
+                events, question, verified_answer
+            )
         return metrics
 
     def _apply_verified_loss(self, loss: torch.Tensor, clip_norm: float) -> Dict[str, Any]:
@@ -1363,7 +1536,8 @@ class SonaraWorldModel:
         temp_path = str(target) + ".tmp"
 
         payload = {
-            "version": 2,
+            "version": 3,
+            "sparse_training_updates": self._sparse_training_updates,
             "architecture": {"dim": self.dim, "family": "temporal_hierarchical"},
             "word_to_id": self.word_to_id,
             "id_to_word": self.id_to_word,
@@ -1394,16 +1568,24 @@ class SonaraWorldModel:
         dims = payload.get("architecture", {}).get("dim")
         old_state = payload["state_dict"]
         current = self.model.state_dict()
-        if dims != self.dim or old_state.keys() != current.keys() or any(
+        missing = set(current) - set(old_state)
+        extra = set(old_state) - set(current)
+        # Earlier compatible checkpoints lacked ONLY the new retrieval head.
+        # Retain every learned world weight and start that optional head fresh.
+        allowed_missing = all(key.startswith("sparse_selector.") for key in missing)
+        if (dims != self.dim or extra or not allowed_missing or any(
             tuple(old_state[key].shape) != tuple(current[key].shape)
-            for key in current
-        ):
+            for key in old_state if key in current
+        )):
             raise ValueError(
                 "Incompatible world-model checkpoint architecture; original weights "
                 "must be preserved and explicitly migrated or retrained"
             )
-        if payload.get("version") not in (1, 2):
+        if payload.get("version") not in (1, 2, 3):
             raise ValueError("Unsupported world-model checkpoint version")
+        updates = payload.get("sparse_training_updates", 0)
+        if not isinstance(updates, int) or not 0 <= updates <= 100000000:
+            raise ValueError("Invalid sparse attention update count")
         restored = payload.get("replay_buckets", {})
         if not isinstance(restored, dict) or len(restored) > self._max_replay_buckets:
             raise ValueError("Invalid or unbounded checkpoint replay data")
@@ -1418,7 +1600,8 @@ class SonaraWorldModel:
                     or not all(isinstance(part, str) for part in example[1:])
                 ):
                     raise ValueError("Malformed verified replay example")
-        self.model.load_state_dict(old_state)
+        self.model.load_state_dict({**current, **old_state})
+        self._sparse_training_updates = updates
         self.word_to_id = payload.get("word_to_id", self.word_to_id)
         self.id_to_word = payload.get("id_to_word", self.id_to_word)
         self.trained_examples_count = payload.get("trained_examples_count", 0)

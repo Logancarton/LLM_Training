@@ -1,0 +1,51 @@
+name: Learned sparse memory research (isolated)
+on:
+  push:
+    paths:
+      - .github/workflows/sparse-memory-research.yml
+      - sonara_world_model.py
+      - test_sparse_cognition.py
+      - experiment_sparse_cognition.py
+  workflow_dispatch:
+
+concurrency:
+  group: sparse-memory-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cognitive-mechanism:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU PyTorch
+        run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Syntax and focused integration
+        run: |
+          python -m py_compile sonara_world_model.py test_sparse_cognition.py experiment_sparse_cognition.py
+          python -m unittest -v test_sparse_cognition
+          git diff --check
+      - name: Held-out sparse experiment (same world weights per seed)
+        run: |
+          python experiment_sparse_cognition.py --seeds 3 --heldout 5 --budget 4 --output artifacts/learned_sparse_report.json
+          python - <<'PY'
+          import json
+          r=json.load(open('artifacts/learned_sparse_report.json'))
+          assert r['design']['same_frozen_world_weights_before_after']
+          assert all(x['world_weights_frozen_unchanged'] for x in r['seeds'])
+          assert r['summary']['before/full']['all_cases'] > 0
+          assert r['summary']['before/full']['all_cases'] == r['summary']['after/full']['all_cases']
+          print('ACTUAL SPARSE RESULTS', json.dumps(r['summary'], sort_keys=True))
+          print('WORLD COMPETENCE', json.dumps(r['seeds'], sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: learned-sparse-controlled-results
+          path: artifacts/learned_sparse_report.json
+          if-no-files-found: warn

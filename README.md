@@ -269,3 +269,58 @@ This is **Integrated only into the opt-in synthetic experiment**, not the
 ordinary conversation learning loop. Contrastive gradient updates alone
 do not establish successful decisions; read the generated JSON metrics before
 claiming action-dependent transfer.
+
+## Learned sparse cognitive memory (research-only)
+
+Research branch: research/learned-sparse-cognitive-memory, stacked on draft PR #10.
+The existing SonaraWorldModel now owns a trainable event ranker using shared
+neural subword representations and verified answer-loss ablation targets.
+Selected ORIGINAL observations feed the existing temporal reasoner;
+SonaraMemorySystem remains authoritative. Neither vectors nor attention
+replace source observations. Ranking is trained on explicitly verified
+feedback only, not teacher predictions assumed true.
+
+Activation is OFF by default. Even with the experimental flag, untrained
+attention performs full-context reasoning. Trained selection may recover
+once, expanding to at most 32 events; remaining low-confidence predictions
+abstain. This DOES NOT detect every high-confidence causal omission.
+
+Opt-in live session with a validated checkpoint:
+
+    python3 LLM_Training.py --mode session --device cpu \
+      --enable-world-model --world-checkpoint path/to/world.pt \
+      --enable-learned-sparse --sparse-budget 8 \
+      --data-dir learning_data/local_test
+
+Live observations come from existing persistent canonical memories after
+restart. Compatible older neural checkpoints retain every old world weight
+and initialize only the previously absent optional ranker. A saved trained
+ranker survives restart but is never enabled automatically.
+
+Verification:
+
+    python3 -m unittest -v test_sparse_cognition
+    python3 experiment_sparse_cognition.py --seeds 3 --heldout 5 \
+      --budget 4 --output artifacts/learned_sparse_report.json
+
+The benchmark contrasts full, recency, random, fixed lexical, learned
+ranking, and ranking plus recovery using identical world weights per seed.
+All held-out tests are synthetic. PR #9/#10 still regress two-action goal
+selection relative to main; this branch must not merge or enable by default
+without preserving main's action-decision accuracy.
+
+The revised experiment first trains the 40-step temporal world model, then
+freezes all world weights and trains ONLY the existing sparse ranker using
+verified mistakes from disjoint training scenarios (including >12-event
+experiences). On 118 held-out synthetic short/long cases, full-context
+accuracy was 82.20%. Sparse accuracy increased from 55.93% to 77.97%
+after attention training, while fixed retrieval achieved 77.12%. The
+world-model weights and full-context predictions did not change. Sparse
+inference used 3.93 vs 12.54 events and 11.11 vs 23.94 mean CPU ms. **Only
+two verified feedback examples across three seeds actually trained
+attention**: this is an encouraging mechanism signal, not proof of general
+causal learning or robust recovery. The existing decision regression
+still blocks merging.
+
+See EXPERIMENT_LEARNED_SPARSE_REPORT.md for the exact run, denominators,
+results, and limitations.
