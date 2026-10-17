@@ -70,3 +70,42 @@ against the matched supervision baseline across held-out entities and seeds.
 
 **Status:** Experimental implementation, not live-session cognition;
 action-conditioned transfer must be demonstrated empirically.
+
+
+## Three-seed replication (2026-10-16, experimental CI)
+
+[GitHub Actions run 38995589571](https://github.com/Logancarton/LLM_Training/actions/runs/38995589571)
+evaluated seeds 100–102, dimension 24, three entirely held-out
+actor/object pairs per seed, and 12 bounded replay optimizer steps after
+two verified interventions. This is 18 goal choices for each condition
+(three seeds × three novel pairs × two destination goals).
+
+| Condition | Held-out goal success |
+| --- | ---: |
+| No-gradient control | 9/18 (50.0%) |
+| After only one verified experience | 10/18 (55.6%) |
+| After two, ordinary supervised only | 18/18 (100%) |
+| After two, supervised + contrastive action loss | 18/18 (100%) |
+| After two, deliberately false swapped labels | 0/18 (0%) |
+
+The signed mean correct-action probability margin on held-out examples
+increased from about **-0.005** after the first experience to **+0.760**
+with contrastive training, versus **+0.663** with matched-step ordinary
+supervised learning. The contrastive margin was stronger in all three seeds,
+but **both methods made the same correct decisions**.
+
+All verification assertions passed, including independent provenance
+of both executed actions, no false labels in canonical memory, and
+unchanged held-out predictions after model checkpoint/restart.
+Compilation, targeted unit/integration checks, live CLI smoke, the prior
+world and experience benchmarks, and `git diff --check` also passed.
+
+**Interpretation:** Two real feedback events enable correct action
+discrimination in this bounded toy world, including on unfamiliar entity
+names. Contrast improved the *margin* in three seeds, not measured
+decision accuracy. Its loss also performs additional forward/backward
+work per optimizer step, so this comparison does not establish
+compute-normalized efficiency or stronger performance in other worlds.
+Neither treatment was enabled for ordinary chat sessions. Broader
+held-out causal structures, many seeds, and calibrated uncertainty
+remain unproven.
