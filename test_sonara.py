@@ -6,7 +6,7 @@ from test_sonara_recall import FakeEncoder
 import torch
 import torch.nn.functional as F
 
-from sonara import CLOCK, FEATURES, VOTE, clock_inputs, features, run
+from sonara import CLOCK, FEATURES, STATE_FILE, VOTE, clock_inputs, features, load_learner, run
 from sonara_recall import Store
 
 
@@ -70,6 +70,20 @@ def test_sonara():
             question, correct = (("where did I leave it", target) if i % 2 else
                                  (f"where did I leave the {things[i // 2 % 6]}", decoys[i // 2 % 6]))
             store.add_question(f"q{i}", question, (i + 1) * day, [correct.id], pool, None)
+            if i == 17:
+                load_learner(store)  # saved halfway; the rest is learned on top of the saved state
+
+        def state(learner):
+            return [learner.model.weight, learner.model.bias] + [
+                v for st in learner.opt.state_dict()["state"].values() for v in st.values()]
+        saved = load_learner(store)
+        (store.dir / STATE_FILE).unlink()
+        replayed = load_learner(store)
+        assert all(torch.equal(a, b) for a, b in zip(state(saved), state(replayed)))  # saved == replayed
+        stale = torch.load(store.dir / STATE_FILE)
+        stale["code"], stale["model"]["weight"] = "older code", stale["model"]["weight"] * 0
+        torch.save(stale, store.dir / STATE_FILE)
+        assert torch.equal(load_learner(store).model.weight, replayed.model.weight)  # code changed: replay
 
         q = store.questions()[5]
         mems, x = features(store, q["question"], q["asked_epoch"], store.questions())
@@ -78,6 +92,7 @@ def test_sonara():
         assert x[:, VOTE].abs().sum() == 0  # no history, no experience inputs
 
         results = run(store)
+        assert saved.model.weight[0].tolist() == run.final_weights  # run learns the same way
         assert results and len(FEATURES) == x.shape[1]
         assert [r["n_train"] for r in results] == sorted(r["n_train"] for r in results)  # time order
         late = results[len(results) // 2:]  # after Sonara has learned from earlier questions

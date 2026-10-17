@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
+import hashlib
 import math
 import statistics
+from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import torch
@@ -37,6 +39,7 @@ STEPS = 10  # learning steps per verified question
 TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
 RULE_GRID = (0.1, 0.2, 0.4, 0.8)
 METHODS = ("baseline", "rule", "control", "sonara")
+STATE_FILE = "sonara_state.pt"
 
 
 def clock_phases(epoch: float) -> Tuple[float, float, float]:
@@ -128,6 +131,34 @@ class Learner:
             self.opt.zero_grad()
             loss.backward()
             self.opt.step()
+
+
+def code_version() -> str:
+    """Hash of the code that computes Sonara's inputs and learning."""
+    here = Path(__file__).parent
+    return hashlib.sha1(b"".join((here / f).read_bytes() for f in ("sonara.py", "sonara_recall.py"))).hexdigest()
+
+
+def load_learner(store: Store) -> Learner:
+    """Sonara as of now: the saved weights and optimizer state if they were built with today's
+    features and code from a prefix of today's train questions, otherwise a replay of all
+    train feedback in time order. Any newer train questions are then learned and saved."""
+    train = sorted((q for q in store.questions() if q["split"] == "train"), key=lambda q: q["asked_epoch"])
+    ids = [q["id"] for q in train]
+    learner, done = Learner(), 0
+    path = store.dir / STATE_FILE
+    if path.exists():
+        state = torch.load(path)
+        if state["features"] == FEATURES and state["code"] == code_version() and ids[:len(state["learned"])] == state["learned"]:
+            learner.model.load_state_dict(state["model"])
+            learner.opt.load_state_dict(state["opt"])
+            done = len(state["learned"])
+    for i in range(done, len(train)):
+        if train[i]["correct_ids"]:
+            learner.learn(store, train[i], train[:i])
+    torch.save({"features": FEATURES, "code": code_version(), "learned": ids,
+                "model": learner.model.state_dict(), "opt": learner.opt.state_dict()}, path)
+    return learner
 
 
 def rule_rank(store: Store, params: Dict, bonus: float, question: str, asked_epoch: float,
