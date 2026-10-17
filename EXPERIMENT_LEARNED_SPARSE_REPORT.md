@@ -6,7 +6,7 @@
 
 Original user observation → canonical SonaraMemorySystem → transient SonaraWorldModel session view → lightweight learned ranker → chronological selected original events → the existing temporal world reasoner → prediction → verified outcome → the existing world-model learning owner → selector updates from event ablation.
 
-The ranker is a head within NeuralWorldModel, not a parallel model or a second memory authority. Neural event representations use the existing trainable character/subword embeddings. Their rank scores are trainable through the existing optimizer, but selector training detaches the world-backbone features to avoid corrupting full-context world knowledge. Ranker training labels come from how removing an original event changes loss against an explicitly verified answer. The target is NOT the teacher's own prediction. The loss-ablation teacher is bounded to 12 events per verified training example; long cases skip attention learning rather than silently claim it happened.
+The ranker is a head within NeuralWorldModel, not a parallel model or a second memory authority. Neural event representations use the existing trainable character/subword embeddings. Their rank scores are trainable through the existing optimizer, but selector training detaches the world-backbone features to avoid corrupting full-context world knowledge. Ranker training labels come from how removing an original event changes loss against an explicitly verified answer. The target is NOT the teacher's own prediction. The loss-ablation teacher is bounded to 32 events per verified training example; long cases skip attention learning rather than silently claim it happened.
 
 ## Recovery and limits
 
@@ -47,6 +47,33 @@ Learned sparse processing was approximately 2.75× faster than full-context reas
 **Experimental verdict:** The model can train attention parameters on verified event-ablation signals, rank from original memory and restrict expensive activation; the ranker did **not** establish superior attention learning, grounded temporal reasoning, good decisions, or effective recovery. Do not merge or enable by default.
 
 **Incomplete scientific gates:** An explicit hidden multi-hop causal dependency test, matched-weight attention-before/after ablation, full-context teacher with validated competence on this distribution, sparse action-choice success against the main baseline, calibrated recovery accept/reject, long-history 10k-event scaling, and per-mode native tensor memory are **not yet proved**. Current behavioral tests validate wiring, abstention, checkpoint and memory integrity rather than those broader claims.
+
+## Frozen-world, two-stage follow-up (October 17, 2026)
+
+**Isolated GitHub Actions:** [run 39044199369](https://github.com/Logancarton/LLM_Training/actions/runs/39044199369), **SUCCESS**. This run passed focused behavioral tests, compilation, checkpoint tests and the new benchmark. It uses exactly the existing world-model and sparse-attention owners, not a parallel reasoning subsystem.
+
+**Stage 1 — world competence.** Reuse the 40-gradient-step synthetic world experiment, with the same 64-dimensional temporal model and three seeds (42, 43, 44). On 300 unseen short-sequence questions per seed, full-context accuracy was **92.00%, 90.67%, 100.00%**. This establishes competence only on these structured synthetic questions, not arbitrary novel prose.
+
+**Stages 2–4 — freeze and verify.** The complete original world model state (except the existing sparse selector head) was frozen, snapshotted and compared bit-for-bit after selector training. All three seeds showed **no change to world weights or full-context predictions**. Before/after sparse evaluation used identical unseen entities, observations, targets and 4-event activation budgets. The test also inserted 16 distractor experiences, expanding histories to 20+ events. Reports include every case and also the subset the frozen full model solved correctly; the latter denominator is explicit.
+
+| Retrieval (118 mixed-length held-out cases) | Verified accuracy before | Verified accuracy after | Mean activated events after | Mean CPU ms after |
+|---|---:|---:|---:|---:|
+| Full context (same frozen weights) | 82.20% | 82.20% | 12.54 | 23.94 |
+| Fixed lexical overlap | 77.12% | 77.12% | 3.93 | 9.77 |
+| Learned sparse selector | **55.93%** | **77.97%** | 3.93 | 11.11 |
+| Learned with existing confidence recovery | 82.20%* | 82.20% | 6.42 | 16.03 |
+
+*The before-recovery mode uses full context because no selector updates exist. Thus it is **not** a fair before/after sparse recovery benefit.*
+
+Among the **97 cases** where frozen full context was correct, learned sparse accuracy increased from **63.92% to 89.69%**. Audited necessary-event inclusion increased from **68.04% to 93.81%**. These are both measured improvements, but the audit uses a synthetic one-event dependency oracle and is not proof of recovering arbitrary causal chains. Learned sparse was ~54% faster than full-context inference in this CI workload, but remains slower than fixed lexical retrieval, and fixed retrieval was only one case behind learned (91 correct versus 92, across all 118).
+
+**Critical caveat — minimal feedback.** Only two seeds produced any trainable sparse errors under the competent-teacher condition: seed 42 received **one** verified attention-training example, seed 43 received **one**, and seed 44 received **zero**. Both actual feedback examples contained more than 12 observations, validating the extended 32-event training capacity. This is too little independent feedback to conclude robust single-exposure causal learning. The data remain heavily templated and related within seeds, so 118 cases are **not** 118 independent natural-world trials.
+
+**Recovery result.** The expanded ranker activated more events in only **2** of 118 after-training cases, with **0** unresolved flags. Its accuracy matched full-context overall but it still missed 2 teacher-correct cases. Neither evidence-dependency detection nor error-triggered recovery learning is established; the existing recovery uses the same ranker and a confidence threshold. Stronger targeted hidden-cause/correction experiments remain required.
+
+**Action outcomes still block merging.** These results are world Q/A and retrieval outcomes, *not* the required restoration of main's 100% two-action synthetic decision success. Prior temporal branch decision success remains 77.78% until a new matched action benchmark proves otherwise.
+
+**Conclusion:** The revised controlled experiment demonstrates **a positive attention-training effect while holding world-model weights fixed**, not reliable learned causal compression. It also identifies how little verified failure data was available. Keep PR #11 in draft. Next experiment should diversify independent verified error cases and test causal recovery under deliberately hidden dependencies, without adding a new cognitive subsystem.
 
 ## Completion criteria
 
