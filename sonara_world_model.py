@@ -32,7 +32,7 @@ import os
 import random
 import re
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -121,6 +121,8 @@ class CharSubwordEmbedding(nn.Module):
         self.projection = nn.Linear(dim * 2, dim)
         self.norm = nn.LayerNorm(dim)
         self._ngram_cache: Dict[str, List[int]] = {}
+        # Internal ablation switch: no learned weights or representational features change.
+        self._vectorized_char_bags = True
 
     def _hash_ngram(self, ngram: str) -> int:
         h = int(hashlib.md5(ngram.encode("utf-8")).hexdigest()[:8], 16)
@@ -152,6 +154,13 @@ class CharSubwordEmbedding(nn.Module):
             offsets.append((start, len(all_buckets)))
         flat_ids = torch.tensor(all_buckets, dtype=torch.long, device=device)
         flat_vecs = self.hash_embeddings(flat_ids)
+        if self._vectorized_char_bags:
+            # Equivalent per-token means in one embedding-bag kernel. Hash indices
+            # are weight-independent, while gradients still reach hash_embeddings.
+            starts = torch.tensor([s for s, _ in offsets], dtype=torch.long, device=device)
+            return F.embedding_bag(
+                flat_ids, self.hash_embeddings.weight, starts, mode="mean"
+            )
         char_vecs = [flat_vecs[s:e].mean(dim=0) for s, e in offsets]
         return torch.stack(char_vecs, dim=0)
 
@@ -474,6 +483,7 @@ class PointerGeneratorHead(nn.Module):
             nn.Tanh(),
             nn.Linear(dim, 1),
         )
+        self._vectorized_token_scoring = True
 
     def forward(
         self,
@@ -523,24 +533,53 @@ class PointerGeneratorHead(nn.Module):
         ):
             cand_prob_accum = torch.zeros(num_cands, device=device)
             overlap_accum = torch.tensor(0.0, device=device)
-            for t, (occ_vecs, occ_sc, c_ids) in enumerate(
-                zip(event_token_occ_vecs, event_token_occ_scalars, event_token_cand_ids)
-            ):
-                if not c_ids or occ_vecs.numel() == 0:
-                    continue
-                M = len(c_ids)
-                sc_vec = self.tok_scalar_proj(occ_sc)  # (M, dim)
-                tok_feat = occ_vecs + sc_vec           # (M, dim)
-                q_exp = q_v.unsqueeze(0).expand(M, -1)
-                tok_logits = self.token_scorer(
-                    torch.cat([tok_feat, q_exp, tok_feat * q_exp], dim=-1)
-                ).squeeze(-1)
-                c_idx_tensor = torch.tensor(c_ids, dtype=torch.long, device=device)
-                tok_logits = tok_logits + 0.05 * sem_scores[c_idx_tensor]
-                tok_probs = F.softmax(tok_logits, dim=-1)  # (M,)
-                weighted_probs = event_attn[t] * tok_probs
-                cand_prob_accum.scatter_add_(0, c_idx_tensor, weighted_probs)
-                overlap_accum = overlap_accum + event_attn[t] * (tok_probs * occ_sc[:, 0]).sum()
+            if self._vectorized_token_scoring:
+                # Score all occurrences in one network call, then keep softmax
+                # within each event. This preserves hierarchical event weights.
+                counts = [len(ids) for ids in event_token_cand_ids]
+                active = [t for t, n in enumerate(counts) if n]
+                if active:
+                    flat_vecs = torch.cat([event_token_occ_vecs[t] for t in active], dim=0)
+                    flat_scalars = torch.cat([event_token_occ_scalars[t] for t in active], dim=0)
+                    flat_ids = torch.tensor(
+                        [i for t in active for i in event_token_cand_ids[t]],
+                        dtype=torch.long, device=device,
+                    )
+                    token_features = flat_vecs + self.tok_scalar_proj(flat_scalars)
+                    query_features = q_v.unsqueeze(0).expand(token_features.size(0), -1)
+                    logits = self.token_scorer(torch.cat([
+                        token_features, query_features, token_features * query_features
+                    ], dim=-1)).squeeze(-1) + 0.05 * sem_scores[flat_ids]
+                    offset = 0
+                    for t in active:
+                        n = counts[t]
+                        tok_probs = F.softmax(logits[offset:offset + n], dim=-1)
+                        weighted = event_attn[t] * tok_probs
+                        cand_prob_accum.scatter_add_(0, flat_ids[offset:offset + n], weighted)
+                        overlap_accum = overlap_accum + event_attn[t] * (
+                            tok_probs * flat_scalars[offset:offset + n, 0]
+                        ).sum()
+                        offset += n
+            else:
+                for t, (occ_vecs, occ_sc, c_ids) in enumerate(
+                    zip(event_token_occ_vecs, event_token_occ_scalars, event_token_cand_ids)
+                ):
+                    if not c_ids or occ_vecs.numel() == 0:
+                        continue
+                    M = len(c_ids)
+                    sc_vec = self.tok_scalar_proj(occ_sc)
+                    tok_feat = occ_vecs + sc_vec
+                    q_exp = q_v.unsqueeze(0).expand(M, -1)
+                    tok_logits = self.token_scorer(
+                        torch.cat([tok_feat, q_exp, tok_feat * q_exp], dim=-1)
+                    ).squeeze(-1)
+                    c_idx_tensor = torch.tensor(c_ids, dtype=torch.long, device=device)
+                    tok_logits = tok_logits + 0.05 * sem_scores[c_idx_tensor]
+                    tok_probs = F.softmax(tok_logits, dim=-1)
+                    cand_prob_accum.scatter_add_(0, c_idx_tensor, event_attn[t] * tok_probs)
+                    overlap_accum = overlap_accum + event_attn[t] * (
+                        tok_probs * occ_sc[:, 0]
+                    ).sum()
             pointer_probs = cand_prob_accum / cand_prob_accum.sum().clamp_min(1e-9)
             ptr_query_overlap = overlap_accum
         else:
@@ -599,6 +638,39 @@ class NeuralWorldModel(nn.Module):
         self.tracker = WorldStateTracker(dim=dim)
         self.reasoner = WorldReasoningCore(dim=dim)
         self.head = PointerGeneratorHead(dim=dim)
+        # Cache only weight-independent tokenization and candidate positions,
+        # never gradient-bearing neural states or authoritative memory.
+        self._event_plan_cache: OrderedDict = OrderedDict()
+        self._event_plan_capacity = 16
+        self._cache_event_plans = True
+
+    def _prepare_events(
+        self, events: Sequence[str]
+    ) -> Tuple[List[List[str]], List[str], List[List[int]]]:
+        """Bounded cache of static event text features (never neural tensors)."""
+        key = tuple(events)
+        if self._cache_event_plans and key in self._event_plan_cache:
+            self._event_plan_cache.move_to_end(key)
+            return self._event_plan_cache[key]
+        tokens = [tokenize(event) for event in events]
+        candidates: List[str] = []
+        hits: List[List[int]] = []
+        indexed: Dict[str, int] = {}
+        for event_index, event_tokens in enumerate(tokens):
+            for token in dict.fromkeys(event_tokens):
+                if not is_content_token(token):
+                    continue
+                if token not in indexed:
+                    indexed[token] = len(candidates)
+                    candidates.append(token)
+                    hits.append([])
+                hits[indexed[token]].append(event_index)
+        prepared = tokens, candidates, hits
+        if self._cache_event_plans:
+            self._event_plan_cache[key] = prepared
+            if len(self._event_plan_cache) > self._event_plan_capacity:
+                self._event_plan_cache.popitem(last=False)
+        return prepared
 
     def _encode_episode_and_query(
         self,
@@ -622,12 +694,8 @@ class NeuralWorldModel(nn.Module):
         Shared differentiable forward backbone for both inference and loss computation.
         """
         query_tokens = tokenize(query)
-        candidates = extract_content_candidates(events)
+        tokenized_events, candidates, candidate_indices = self._prepare_events(events)
         cand_to_idx = {c: idx for idx, c in enumerate(candidates)}
-        candidate_indices = []
-        for cand in candidates:
-            ev_hits = [i for i, ev in enumerate(events) if cand in tokenize(ev)]
-            candidate_indices.append(ev_hits)
 
         if not events:
             q_vec = self.event_encoder(query_tokens, word_to_id, device)
@@ -648,7 +716,6 @@ class NeuralWorldModel(nn.Module):
 
         T = len(events)
         Lq = len(query_tokens)
-        tokenized_events = [tokenize(ev) for ev in events]
         step_indices = torch.arange(T, dtype=torch.long, device=device)
         t_vecs = self.temporal_encoding(step_indices)  # (T, dim)
 
