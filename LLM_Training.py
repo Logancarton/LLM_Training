@@ -1391,7 +1391,8 @@ def learn_approved(data_dir, args, data, word_model, reader, writer, device):
 
 
 def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-instruct",
-                enable_world_model=False, world_checkpoint="", enable_adaptive_loop=False):
+                enable_world_model=False, world_checkpoint="", enable_adaptive_loop=False,
+                enable_learned_sparse=False, sparse_budget=8):
     session_id = uuid.uuid4().hex[:12]
     from sonara_memory import SonaraMemorySystem
     from sonara_research import ResearchCognition
@@ -1404,6 +1405,13 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
         world_ckpt = Path(world_checkpoint) if world_checkpoint else (Path(data_dir) / "world_model.pt")
         try:
             world_model = SonaraWorldModel(checkpoint_path=world_ckpt if world_ckpt.exists() else None, device="cpu")
+            world_model._learned_sparse_activation = bool(enable_learned_sparse)
+            world_model._max_active_events = sparse_budget
+            # Reconstitute the working view from canonical evidence after a restart.
+            # Model weights and retrieved text are not competing memory authorities.
+            for observed in mem_sys.memories.values():
+                if observed.source == "user_observation" and observed.content:
+                    world_model.observe(observed.content)
         except Exception as error:
             print(f"[Sonara] Warning: world model checkpoint not loaded: {error}")
             world_model = None
@@ -1415,6 +1423,10 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
     print(f"Sonara Session {session_id} | /quit | /ask <question> | /remember <text> | /recall <query> | /timeline")
     if enable_world_model and world_model is not None:
         print("World reasoning: NEURAL WORLD MODEL ACTIVE (pointer-generator state tracker).")
+        if enable_learned_sparse:
+            print(f"Learned sparse attention: RESEARCH ONLY, budget={sparse_budget}, "
+                  f"verified selector updates={world_model._sparse_training_updates}; "
+                  "untrained rankers use full context.")
     else:
         print("World reasoning: NOT IMPLEMENTED. No programmed location/temporal answers or auto-trained world classifier.")
     print("Local research: /research <question> and /rate-research <0..1> (requires --enable-research and Ollama).")
@@ -1609,6 +1621,8 @@ def run_session(data_dir, enable_research=False, research_model="qwen2.5:1.5b-in
                                    else ("unknown" if ask else "no-claim"))),
             "input_id": record["id"],
         }
+        if ask and enable_learned_sparse and world_model is not None and world_model.last_sparse_trace:
+            answer_record["sparse_activation"] = dict(world_model.last_sparse_trace)
         if ask and enable_adaptive_loop:
             answer_record["adaptive_gate"] = {
                 "action": decision.action, "reason": decision.reason,
@@ -1788,6 +1802,10 @@ def main():
                         help="Locally installed Ollama model for /research; no API key or cloud service")
     parser.add_argument("--enable-world-model", action="store_true",
                         help="Enable experimental neural World Model in live session")
+    parser.add_argument("--enable-learned-sparse", action="store_true",
+                        help="Opt-in research learned sparse neural evidence activation; requires --enable-world-model")
+    parser.add_argument("--sparse-budget", type=int, default=8,
+                        help="Experimental initial activated event count (1..32)")
     parser.add_argument("--world-checkpoint", default="",
                         help="Path to neural World Model checkpoint")
     parser.add_argument("--enable-adaptive-loop", action="store_true",
@@ -1819,6 +1837,10 @@ def main():
                 setattr(args, name, value)
     if args.epochs < 0 or args.idea_epochs < 0 or (args.steps is not None and args.steps < 0):
         parser.error("--epochs and --steps must not be negative")
+    if args.enable_learned_sparse and (not args.enable_world_model or args.mode != "session"):
+        parser.error("--enable-learned-sparse requires --mode session --enable-world-model")
+    if not 1 <= args.sparse_budget <= 32:
+        parser.error("--sparse-budget must be from 1 to 32")
     if args.batch_size < 1 or args.layers < 1 or args.width < 8 or args.adapt_steps < 0 or args.personal_steps < 1 or args.personal_lr <= 0 or args.replay_weight < 0 or args.max_retention_loss_rise < 0:
         parser.error("--batch-size and --layers must be positive; --width at least 8")
 
@@ -1873,7 +1895,9 @@ def main():
                     research_model=args.research_model,
                     enable_world_model=args.enable_world_model,
                     world_checkpoint=args.world_checkpoint,
-                    enable_adaptive_loop=args.enable_adaptive_loop)
+                    enable_adaptive_loop=args.enable_adaptive_loop,
+                    enable_learned_sparse=args.enable_learned_sparse,
+                    sparse_budget=args.sparse_budget)
         return
     training, valid, originals_count, synth_count = build_examples(args.examples, args.seed, args.ideas_file, args.details_file)
     data = encode_data(training, valid)
