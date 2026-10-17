@@ -56,3 +56,10 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Result by period:** Sonara 50 / 50 / 100% (same as Run 6). The control dropped to 50% in period 1 (it was 100%). The baseline got 100 / 50 / 100%.
 - **Weights:** life position +1.1, so later memories are favored. Time of year fell from +2.0 to +0.6 and newer-similar from −2.1 to −1.8. The new input took over part of what the cycles were absorbing.
 - **Wrong answers:** the same two misses. "Longest run" now ranks running notes in its top 5 ("Ran 10 km", the half marathon, the shoes) instead of the Sonara-start note, but still not the 18 km note. "Vehicle start" still ranks the brake notes above the battery notes. The early-period drop is still the online step size (Run 6), not the new input.
+
+## 2026-10-17 · Run 8: slower online learning rate
+
+- **Changed:** one change. Online Adam learning rate 0.05 → 0.01. The value was chosen before running, not tuned on this data.
+- **Result by period:** Sonara 100 / 50 / 100%, the same as the baseline, rule and control in every period. The early drop from Runs 6–7 (50% in period 1) is gone; Sonara no longer falls below its starting point. In the synthetic test's later half: Sonara 71% (it was 86%), control 57%, baseline 57%. Slower learning still learns, just less in the same number of questions.
+- **Weights** are smaller everywhere (cosine 4.3 → 1.8, newer-similar −1.8 → −0.6), so they stay nearer the cosine-only start.
+- **Wrong answers:** one miss, "longest run". The 18 km note is still missing from the top 5, which holds the running shoes, two project notes and the book. The baseline and control miss it too in that period, so this is a cosine problem the experience hasn't fixed yet, not a learning problem.
