@@ -8,7 +8,7 @@
 | Fixed baseline (tuned on train; cosine, recency, newer_similar, source) | yes | `chat` answers from it | yes | no |
 | Sonara learner (online; clock + experience inputs) | yes | `curve` only | in `curve` | no (synthetic only) |
 | Top-1 target metric, recall@5 and `answer_ok` alongside | yes | `curve` | yes | no |
-| Incremental `newer_similar` (saved, linear per memory) | yes | Sonara inputs | yes | matches N x N in tests |
+| Incremental `newer_similar`, newer notes only (saved, linear per memory) | yes | Sonara inputs | yes | matches N x N in tests |
 | Saved learner state, replay on feature/code change | yes | `chat` | yes | saved == replayed in tests |
 | Bounded candidate set (top 50 cosine + 10 newest), shared | yes | baseline, Sonara, `chat` | yes | no |
 | Shadow ranking in `chat` (both rankings logged; learns live from train only) | yes | `chat` | yes | no |
@@ -63,7 +63,7 @@ The last three are the "what past feedback said" part. They count only train-spl
 Time is one continuous progression, not just stamps on events. Every time Sonara runs, it reads "now" to the second, and every memory is a point on that same timeline. Nothing runs in the background; elapsed time and quiet periods are computed from the clock when Sonara is used. Event dates are not pulled out of the text.
 
 - **Clock inputs:** where now sits and where each memory sits (time of day, day of week, time of year, as cycles), plus the elapsed time between them in log-seconds. Also each memory's absolute position: seconds since Sonara's first memory, in log scale.
-- **Progression inputs:** how many sessions have started between the memory and now (a quiet hour or more starts a new session, judged from memory timestamps), and how similar the most similar newer memory is.
+- **Progression inputs:** how many sessions have started between the memory and now (a quiet hour or more starts a new session, judged from memory timestamps), and how similar the most similar newer *note* is (changed 2026-10-17: Qwen's restatements of a fact don't count as replacing it).
 - **Growth:** add the learner's capacity only as labels grow, and keep the no-experience control at every step, so the curve shows whether time is actually learned.
 
 ## How it is measured (decided before building)
@@ -80,7 +80,7 @@ Real use. You ask Qwen questions in `sonara_recall.py chat`. The baseline recall
 
 - **Labeling pool:** (changed 2026-10-17) you label from up to 15 shuffled candidates: the baseline's top 5, Sonara's top 5 and the 5 newest, shown without scores, or by typing a memory id. Each question row records which system proposed each candidate, so memories only Sonara finds can be credited. Marking a memory useful (including a Qwen answer) means "useful for that question", not "verified fact". Labels still favor what the two systems and recency already surface; a correct memory neither ranks in its top 5 is found only by typing its id. This is a known limit.
 - **Volume:** a 5-point gap needs roughly 150–300 eval questions to tell apart from noise, i.e. about 10 verified questions a day for several weeks.
-- **Fair baseline:** it gets the same inputs Sonara gets, including each memory's source (note, question, Qwen answer, follow-up) and, since 2026-10-17, `newer_similar` (how similar the most similar newer memory is). Its recency weight, half-life, `newer_similar` weight and per-source bias are tuned together (every combination; newer down to −1.6, source biases −1.6 to +0.4 relative to notes) on the same train questions Sonara learns from, never on eval: most top-1 hits first, then recall@5, then the widest margin between correct and other memories. Qwen-generated memories stay in recall; whether they help is for the feedback to show.
+- **Fair baseline:** it gets the same inputs Sonara gets, including each memory's source (note, question, Qwen answer, follow-up) and, since 2026-10-17, `newer_similar` (how similar the most similar newer note is). Its recency weight, half-life, `newer_similar` weight and per-source bias are tuned together (every combination; newer down to −1.6, source biases −1.6 to +0.4 relative to notes) on the same train questions Sonara learns from, never on eval: most top-1 hits first, then recall@5, then the widest margin between correct and other memories. Qwen-generated memories stay in recall; whether they help is for the feedback to show.
 
 ## What the earlier experiments taught us
 

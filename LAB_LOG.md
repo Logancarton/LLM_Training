@@ -149,3 +149,24 @@ One entry per run: what changed, result, what the wrong answers showed.
   2. **`newer_similar` no longer means "replaced" (5 misses).** The old version still wins after updates (rent $1450, dentist Oct 31, Maya Nov 8). Sonara's `newer_similar` weight went *positive* (+0.18). Every useful fact gets restated by later Qwen questions, answers and follow-ups, so a high `newer_similar` now marks a memory that gets talked about, not one that was replaced. The baseline inherits the same input.
   3. **The candidate set hides what only experience finds (4 misses).** For "What's my PR?", "When's the car due?", "When's my thing with Dr. Lee?" and "What's the usual?", the correct note wasn't in the top 50 by cosine or the 10 newest, so no method could rank it. Experience can't help with a memory it never sees.
 - **Possible next changes, one at a time:** (2) compute `newer_similar` only against newer *notes*, so Qwen's restatements don't count; (3) add memories marked useful for similar past train questions to the shared candidate set; (1) look at the age bias again after those two, because part of it may come from them.
+
+## 2026-10-17 · Run 19: newer_similar counts only newer notes
+
+- **Changed:** one change, decided with the user after Run 18. `newer_similar` used to compare a memory against every newer memory. Now it compares only against newer *notes* (`user_note`, plus the legacy `user_observation`). Qwen's questions, answers and follow-ups restate useful facts, so a newer Qwen memory no longer counts as replacing anything. The saved index records which sources count and rebuilds when that changes. Sonara and the baseline both use the new input.
+- **Checks:** the incremental index still matches the all-pairs version when only notes count. A note that Qwen restated word for word keeps a low `newer_similar`, and it rises once a newer, similar note is written.
+- **Result (mock-life store from Run 18, same data, re-scored), top-1 on 34 eval:**
+
+  | | baseline | control | Sonara |
+  |---|---|---|---|
+  | all | 53 → 56% | 41 → 47% | 44 → 47% |
+  | direct (17) | 82 → 82% | 59 → 71% | 59 → 59% |
+  | shorthand (17) | 24 → 29% | 24 → 24% | 29 → 35% |
+  | after an update (10) | 10 → 20% | 20 → 40% | 30 → 30% |
+
+  Sonara's `newer_similar` weight went from +0.18 to −1.65, now pointing the right way. Experience weights are about the same (vote +1.24, useful +0.46).
+- **Wrong answers (all 18 Sonara misses read):**
+  - *Experience holds onto the old version (2):* "What day is my dentist cleaning?" twice ranks the Oct 31 note first, while the control gets the Nov 20 one. The Oct 31 note had been marked useful several times before the update, and the useful count and neighbor vote still point at it. Learning from past usefulness and noticing updates pull in opposite directions. The same thing likely explains rent ($1450 over $1525) and Maya (Nov 8 over Nov 15).
+  - *Age bias (7):* still the first memory ever written ("Dentist appointment is Tuesday the 21st") ranked first for unrelated questions (code, coffee, rent, Maya, standup). The log-seconds inputs aren't scaled, so a gap of 1.2M s vs 100k s outweighs cosine differences. Gap +0.43 and life position +0.28 move together and the first memory is an outlier on both.
+  - *Outside the candidate set (4):* PR, car due, Dr. Lee, the usual, as in Run 18.
+  - *Wrong but nearby (5):* "car made a weird noise" over "oil change due" (3), "Planet Fitness" over rent (1), diary notes (2).
+- **Reading:** this fix was needed: the input now means "replaced". On its own, Sonara is still level with the control and below the baseline overall. Next, as planned: the candidate set (so experience can reach shorthand memories), then the age bias. The pull between experience and updates is a new finding to keep watching. These are my mock data, not evidence.

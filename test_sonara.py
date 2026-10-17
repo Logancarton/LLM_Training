@@ -34,18 +34,25 @@ def test_clock():
         assert col["newer_similar"][4] == 0.0  # nothing is newer than the latest memory
         life = torch.log1p(torch.tensor([0.0, 6 * 86400, 6.5 * 86400, 6.5 * 86400 + 60, 7 * 86400 - 30]))
         assert torch.allclose(col["log_life_seconds"], life)  # position since the first memory
-        # The incremental index matches comparing every pair, as of any second.
-        texts = ["garlic planted", "garlic planted in the bed", "dentist moved", "garlic", "the bed"]
-        later = [store.add(t, "qwen_answer") for t in texts]
+        # The incremental index matches comparing every pair, as of any second; only newer notes count.
+        texts = [("garlic planted", "qwen_answer"), ("garlic planted in the bed", "user_note"),
+                 ("dentist moved", "qwen_answer"), ("garlic", "user_note"), ("the bed", "qwen_answer")]
+        later = [store.add(t, src) for t, src in texts]
         for i, m in enumerate(later):
             m.timestamp_epoch = now + 100 * i
         mems += later
         vecs = F.normalize(store.encoder.vectors([m.content for m in mems]), dim=1)
         times = torch.tensor([m.timestamp_epoch for m in mems], dtype=torch.float64)
+        note = torch.tensor([m.source == "user_note" for m in mems])
         for t in (now + 50, now + 250, now + 1000):
-            newer = (times[None, :] > times[:, None]) & (times[None, :] < t)
+            newer = (times[None, :] > times[:, None]) & (times[None, :] < t) & note[None, :]
             full = (vecs @ vecs.T).masked_fill(~newer, -1.0).max(dim=1).values.clamp(min=0.0)
             assert torch.allclose(store.newer_similar(mems, t), full)
+        # "garlic planted" (a note) was restated word for word by Qwen at now; that doesn't count,
+        # but the newer note "garlic planted in the bed" (now + 100) does.
+        assert later[0].content == mems[2].content and later[0].source == "qwen_answer"
+        assert store.newer_similar([mems[2]], now + 50).item() < 0.99
+        assert store.newer_similar([mems[2]], now + 150).item() > store.newer_similar([mems[2]], now + 50).item()
         assert Store(tmp, encoder=FakeEncoder())._newer == store._newer  # saved and reloaded
     finally:
         shutil.rmtree(tmp)

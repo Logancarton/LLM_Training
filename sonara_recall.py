@@ -41,7 +41,8 @@ BIAS_GRID = (-1.6, -0.8, -0.4, -0.2, -0.1, 0.0, 0.1, 0.4)
 REFERENCE_SOURCE = "user_note"
 CHUNK = 20000  # settings combinations scored at once
 TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
-POOL_COSINE, POOL_NEWEST = 50, 10  # the bounded candidate set every method ranks from
+POOL_COSINE, POOL_NEWEST = 50, 10
+NOTE_SOURCES = ("user_note", "user_observation")  # written by the user, not restated by Qwen  # the bounded candidate set every method ranks from
 
 
 def split_for(question_id: str) -> str:
@@ -57,7 +58,7 @@ class Store:
         self.vectors_path = self.dir / "vectors.pt"
         self.questions_path = self.dir / "questions.jsonl"
         self.newer_path = self.dir / "newer_similar.pt"
-        self._newer = torch.load(self.newer_path) if self.newer_path.exists() else {"order": [], "records": {}}
+        self._newer = torch.load(self.newer_path) if self.newer_path.exists() else {}
         self.encoder = encoder or PretrainedTextEncoder(cache_path=self.vectors_path)
         if self.encoder.ensure(m.content for m in self.memory.memories.values()):
             self.encoder.save(self.vectors_path)
@@ -93,7 +94,8 @@ class Store:
                 if m.timestamp_epoch < epoch and m.source != "sonara_reflection"]
 
     def newer_similar(self, mems: Sequence[Memory], now: float) -> torch.Tensor:
-        """For each memory, its highest cosine (at least 0) to a memory written after it and before now."""
+        """For each memory, its highest cosine (at least 0) to a note written after it and before now.
+        Only notes count: Qwen restates useful facts, so a newer Qwen memory doesn't mean replaced."""
         self._update_newer()
         out = []
         for m in mems:
@@ -107,14 +109,17 @@ class Store:
         updated once per new memory (linear) and saved, replacing an N x N comparison."""
         mems = sorted(self.before(math.inf), key=lambda m: m.timestamp_epoch)
         order = [[m.id, m.timestamp_epoch] for m in mems]
-        done = len(self._newer["order"])
-        if order[:done] != self._newer["order"]:  # an older memory appeared or a time changed: rebuild
-            self._newer, done = {"order": [], "records": {}}, 0
+        done = len(self._newer.get("order", []))
+        if order[:done] != self._newer.get("order") or self._newer.get("sources") != list(NOTE_SOURCES):
+            # an older memory appeared, a time changed, or the rule changed: rebuild
+            self._newer, done = {"order": [], "records": {}, "sources": list(NOTE_SOURCES)}, 0
         if done == len(mems):
             return
         vecs = torch.nn.functional.normalize(self.encoder.vectors([m.content for m in mems]), dim=1)
         records = self._newer["records"]
         for j in range(done, len(mems)):
+            if mems[j].source not in NOTE_SOURCES:
+                continue
             t = mems[j].timestamp_epoch
             for i, sim in enumerate((vecs[:j] @ vecs[j]).tolist()):
                 if mems[i].timestamp_epoch < t:
