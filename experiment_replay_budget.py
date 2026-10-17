@@ -28,7 +28,7 @@ def run_seed(seed: int, steps: int):
     runs = {}
     for cap, label in zip(CAPS, LABELS):
         torch.manual_seed(seed)
-        owner = SonaraWorldModel(device="cpu", dim=24, lr=0.003)
+        owner = SonaraWorldModel(device="cpu", dim=64, lr=0.003)
         owner._max_replay_examples_per_update = cap
         rng = random.Random(seed)
         start_wall = time.perf_counter()
