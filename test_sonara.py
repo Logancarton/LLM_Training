@@ -22,7 +22,7 @@ def test_clock():
             m = store.add(text, "user_note")
             m.timestamp_epoch = now - back
             mems.append(m)
-        x = clock_inputs(mems, F.normalize(store.encoder.vectors([m.content for m in mems]), dim=1), now)
+        x = clock_inputs(store, mems, now)
         col = {name: x[:, i] for i, name in enumerate(CLOCK)}
         assert abs(col["log_gap_seconds"][4] - torch.log1p(torch.tensor(30.0))) < 1e-4  # seconds, not days
         assert col["same_time_of_day"][0] > 0.99 and col["same_time_of_day"][1] > 0.99  # 7 days, 1 day ago
@@ -34,6 +34,19 @@ def test_clock():
         assert col["newer_similar"][4] == 0.0  # nothing is newer than the latest memory
         life = torch.log1p(torch.tensor([0.0, 6 * 86400, 6.5 * 86400, 6.5 * 86400 + 60, 7 * 86400 - 30]))
         assert torch.allclose(col["log_life_seconds"], life)  # position since the first memory
+        # The incremental index matches comparing every pair, as of any second.
+        texts = ["garlic planted", "garlic planted in the bed", "dentist moved", "garlic", "the bed"]
+        later = [store.add(t, "qwen_answer") for t in texts]
+        for i, m in enumerate(later):
+            m.timestamp_epoch = now + 100 * i
+        mems += later
+        vecs = F.normalize(store.encoder.vectors([m.content for m in mems]), dim=1)
+        times = torch.tensor([m.timestamp_epoch for m in mems], dtype=torch.float64)
+        for t in (now + 50, now + 250, now + 1000):
+            newer = (times[None, :] > times[:, None]) & (times[None, :] < t)
+            full = (vecs @ vecs.T).masked_fill(~newer, -1.0).max(dim=1).values.clamp(min=0.0)
+            assert torch.allclose(store.newer_similar(mems, t), full)
+        assert Store(tmp, encoder=FakeEncoder())._newer == store._newer  # saved and reloaded
     finally:
         shutil.rmtree(tmp)
     print("✓ clock tests passed")

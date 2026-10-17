@@ -11,6 +11,7 @@ so the evaluation set is frozen and never trained on.
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import hashlib
 import json
@@ -44,8 +45,11 @@ class Store:
 
     def __init__(self, memory_dir: str = "sonara_memories", encoder=None):
         self.memory = SonaraMemorySystem(memory_dir)
-        self.vectors_path = Path(memory_dir) / "vectors.pt"
-        self.questions_path = Path(memory_dir) / "questions.jsonl"
+        self.dir = Path(memory_dir)
+        self.vectors_path = self.dir / "vectors.pt"
+        self.questions_path = self.dir / "questions.jsonl"
+        self.newer_path = self.dir / "newer_similar.pt"
+        self._newer = torch.load(self.newer_path) if self.newer_path.exists() else {"order": [], "records": {}}
         self.encoder = encoder or PretrainedTextEncoder(cache_path=self.vectors_path)
         if self.encoder.ensure(m.content for m in self.memory.memories.values()):
             self.encoder.save(self.vectors_path)
@@ -74,6 +78,38 @@ class Store:
     def before(self, epoch: float) -> List[Memory]:
         return [m for m in self.memory.memories.values()
                 if m.timestamp_epoch < epoch and m.source != "sonara_reflection"]
+
+    def newer_similar(self, mems: Sequence[Memory], now: float) -> torch.Tensor:
+        """For each memory, its highest cosine (at least 0) to a memory written after it and before now."""
+        self._update_newer()
+        out = []
+        for m in mems:
+            recs = self._newer["records"].get(m.id, [])
+            i = bisect.bisect_left([t for t, _ in recs], now)
+            out.append(recs[i - 1][1] if i else 0.0)
+        return torch.tensor(out)
+
+    def _update_newer(self) -> None:
+        """Each memory keeps a running-max record of (time, cosine) against newer memories,
+        updated once per new memory (linear) and saved, replacing an N x N comparison."""
+        mems = sorted(self.before(math.inf), key=lambda m: m.timestamp_epoch)
+        order = [[m.id, m.timestamp_epoch] for m in mems]
+        done = len(self._newer["order"])
+        if order[:done] != self._newer["order"]:  # an older memory appeared or a time changed: rebuild
+            self._newer, done = {"order": [], "records": {}}, 0
+        if done == len(mems):
+            return
+        vecs = torch.nn.functional.normalize(self.encoder.vectors([m.content for m in mems]), dim=1)
+        records = self._newer["records"]
+        for j in range(done, len(mems)):
+            t = mems[j].timestamp_epoch
+            for i, sim in enumerate((vecs[:j] @ vecs[j]).tolist()):
+                if mems[i].timestamp_epoch < t:
+                    r = records.setdefault(mems[i].id, [])
+                    if sim > (r[-1][1] if r else 0.0):
+                        r.append((t, sim))
+        self._newer["order"] = order
+        torch.save(self._newer, self.newer_path)
 
     def similarities(self, question: str, mems: Sequence[Memory]) -> torch.Tensor:
         vecs = torch.nn.functional.normalize(self.encoder.vectors([m.content for m in mems]), dim=1)

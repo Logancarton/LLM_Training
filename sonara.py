@@ -46,7 +46,7 @@ def clock_phases(epoch: float) -> Tuple[float, float, float]:
     return day, (t.weekday() + day) / 7, (t.timetuple().tm_yday - 1 + day) / 365.25
 
 
-def clock_inputs(mems: Sequence[Memory], vecs: torch.Tensor, now: float) -> torch.Tensor:
+def clock_inputs(store: Store, mems: Sequence[Memory], now: float) -> torch.Tensor:
     """(N, 7) day-clock inputs for memories on one continuous timeline: relative to now, and
     the memory's own position as seconds since Sonara's first memory."""
     times = torch.tensor([m.timestamp_epoch for m in mems], dtype=torch.float64)
@@ -59,9 +59,7 @@ def clock_inputs(mems: Sequence[Memory], vecs: torch.Tensor, now: float) -> torc
     starts = [b for a, b in zip(ordered, ordered[1:]) if b - a >= SESSION_GAP]
     x[:, 4] = torch.log1p(torch.tensor([len(starts) - bisect.bisect_right(starts, t) for t in times.tolist()],
                                        dtype=torch.float32))
-    newer = times[None, :] > times[:, None]  # [i, j]: memory j was written after memory i
-    sims = (vecs @ vecs.T).masked_fill(~newer, -1.0)
-    x[:, 5] = sims.max(dim=1).values.clamp(min=0.0)
+    x[:, 5] = store.newer_similar(mems, now)
     x[:, 6] = torch.log1p(times - times.min()).float()
     return x
 
@@ -76,7 +74,7 @@ def features(store: Store, question: str, asked_epoch: float,
     vecs = F.normalize(store.encoder.vectors([m.content for m in mems]), dim=1)
     qvec = F.normalize(store.encoder.vectors([question])[0], dim=0)
     x[:, COS] = vecs @ qvec
-    x[:, 1:SRC] = clock_inputs(mems, vecs, asked_epoch)
+    x[:, 1:SRC] = clock_inputs(store, mems, asked_epoch)
     for i, m in enumerate(mems):
         if m.source in SOURCES:
             x[i, SRC + SOURCES.index(m.source)] = 1.0
