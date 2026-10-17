@@ -63,12 +63,15 @@ class Store:
 
     def add_question(self, question_id: str, question: str, asked_epoch: float,
                      correct_ids: List[str], candidate_ids: List[str],
-                     answer_ok: Optional[bool], rankings: Optional[Dict[str, List[str]]] = None) -> Dict:
+                     answer_ok: Optional[bool], rankings: Optional[Dict[str, List[str]]] = None,
+                     proposed_by: Optional[Dict[str, List[str]]] = None) -> Dict:
         row = {"id": question_id, "split": split_for(question_id), "question": question,
                "asked_epoch": asked_epoch, "correct_ids": correct_ids,
                "candidate_ids": candidate_ids, "answer_ok": answer_ok}
         if rankings:
             row["rankings"] = rankings
+        if proposed_by:
+            row["proposed_by"] = proposed_by  # which system put each candidate in the labeling pool
         with self.questions_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
         return row
@@ -185,16 +188,20 @@ def score(store: Store, split_epoch: Optional[float] = None):
     return params, len(train), results
 
 
-def label_pool(store: Store, question: str, asked_epoch: float) -> List[Memory]:
-    """Top 10 by similarity + 5 most recent, shuffled, shown without scores."""
-    mems = store.before(asked_epoch)
-    if not mems:
-        return []
-    by_sim = [mems[i] for i in store.similarities(question, mems).argsort(descending=True)[:10].tolist()]
-    recent = sorted(mems, key=lambda m: m.timestamp_epoch, reverse=True)[:5]
-    pool = list({m.id: m for m in by_sim + recent}.values())
-    random.shuffle(pool)
-    return pool
+def label_pool(store: Store, asked_epoch: float,
+               rankings: Dict[str, Sequence[Memory]]) -> Tuple[List[Memory], Dict[str, List[str]]]:
+    """Each system's top K plus the K newest memories, shuffled and shown without scores, so a
+    memory only one system finds can still be labeled. Also returns who proposed each one."""
+    newest = sorted(store.before(asked_epoch), key=lambda m: m.timestamp_epoch, reverse=True)[:K]
+    proposed: Dict[str, List[str]] = {}
+    pool: Dict[str, Memory] = {}
+    for name, ranked in list(rankings.items()) + [("newest", newest)]:
+        for m in ranked[:K]:
+            pool[m.id] = m
+            proposed.setdefault(m.id, []).append(name)
+    pool_list = list(pool.values())
+    random.shuffle(pool_list)
+    return pool_list, proposed
 
 
 FOLLOW_UP = ("About your answer: 1) What makes this true? 2) What would make it not true? "
@@ -242,7 +249,7 @@ def chat(store: Store) -> None:
         shadow = sonara.rank(store, {"question": line, "asked_epoch": asked}, history)
         answer, follow_up = ask_qwen(line, baseline[:K])
         print(f"\nqwen> {answer}\n\nqwen (follow-up)> {follow_up}\n")
-        pool = label_pool(store, line, asked)
+        pool, proposed = label_pool(store, asked, {"baseline": baseline, "sonara": shadow})
         for i, m in enumerate(pool, 1):
             print(f"  {i:2}. ({m.timestamp_human}) {m.content[:160]}")
         picks = input("Memories useful for this question, true or not (numbers or ids, Enter = none): ").split()
@@ -254,7 +261,8 @@ def chat(store: Store) -> None:
         store.add(follow_up, source="qwen_follow_up")
         row = store.add_question(q_mem.id, line, asked, correct, [m.id for m in pool],
                                  {"y": True, "n": False}.get(ok),
-                                 {"baseline": [m.id for m in baseline], "sonara": [m.id for m in shadow]})
+                                 {"baseline": [m.id for m in baseline], "sonara": [m.id for m in shadow]},
+                                 proposed)
         if row["split"] == "train":
             sonara = load_learner(store)
         print(f"[logged {row['split']} question with {len(correct)} useful memories]")

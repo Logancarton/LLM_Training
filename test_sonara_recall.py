@@ -5,7 +5,7 @@ import tempfile
 
 import torch
 
-from sonara_recall import POOL_COSINE, POOL_NEWEST, Store, baseline_rank, candidates, hit, score, split_for, tune
+from sonara_recall import POOL_COSINE, POOL_NEWEST, Store, baseline_rank, candidates, hit, label_pool, score, split_for, tune
 
 
 class FakeEncoder:
@@ -71,6 +71,14 @@ def test_recall():
         pool = candidates(store, "what did Jake like", 20 * day)
         assert len(pool) <= POOL_COSINE + POOL_NEWEST and old in pool
         assert all(store.memory.memories[m.id] in pool for m in store.before(20 * day)[-POOL_NEWEST:])
+
+        # The labeling pool unions each system's top 5 with the newest and records who proposed what.
+        ranked = baseline_rank(store, "what did Jake like", 20 * day)
+        only_sonara = ranked[-1]  # last for the baseline, first for Sonara
+        labels, proposed = label_pool(store, 20 * day, {"baseline": ranked, "sonara": [only_sonara] + ranked[:4]})
+        assert only_sonara in labels and proposed[only_sonara.id] == ["sonara"]
+        assert set(proposed) == {m.id for m in labels} and all(m in labels for m in ranked[:5])
+        assert sum("newest" in v for v in proposed.values()) == 5
     finally:
         shutil.rmtree(tmp)
     print("✓ recall tests passed")

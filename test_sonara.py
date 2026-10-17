@@ -124,6 +124,8 @@ def test_shadow_chat():
         rows = store.questions()
         assert len(rows) == 8 and {r["split"] for r in rows} == {"train", "eval"}
         assert all(r["rankings"]["baseline"] and r["rankings"]["sonara"] for r in rows)
+        assert all(set(r["proposed_by"]) == set(r["candidate_ids"]) for r in rows)
+        assert all(set(r["rankings"]["sonara"][:5]) <= set(r["candidate_ids"]) for r in rows)
         state = torch.load(store.dir / STATE_FILE)
         assert state["learned"] == [r["id"] for r in rows if r["split"] == "train"]  # never eval
 

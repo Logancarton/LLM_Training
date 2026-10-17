@@ -12,7 +12,7 @@
 | Saved learner state, replay on feature/code change | yes | `chat` | yes | saved == replayed in tests |
 | Bounded candidate set (top 50 cosine + 10 newest), shared | yes | baseline, Sonara, `chat` | yes | no |
 | Shadow ranking in `chat` (both rankings logged; learns live from train only) | yes | `chat` | yes | no |
-| Union labeling pool | no | | | |
+| Union labeling pool (baseline top 5 + Sonara top 5 + 5 newest, proposers recorded) | yes | `chat` | yes | no |
 
 ## Goal
 
@@ -78,7 +78,7 @@ Time is one continuous progression, not just stamps on events. Every time Sonara
 
 Real use. You ask Qwen questions in `sonara_recall.py chat`. The baseline recalls memories, Qwen answers from them, and you mark which memories were actually useful. After every answer Qwen is asked: what makes this true, what would make it not true, and what are the most relevant variables and how they relate to the question and answer. The question, the answer, that follow-up and any notes are stored as timestamped memories. Each verified question is assigned to train or eval when it is written (1 in 3 eval, by id hash), so the eval set is frozen and never trained on. Synthetic data is used only in tests.
 
-- **Labeling pool:** you label from 15 shuffled candidates (top 10 by similarity + 5 most recent), shown without scores, or by typing a memory id. Marking a memory useful (including a Qwen answer) means "useful for that question", not "verified fact". Labels found this way favor what similarity and recency already surface, so Sonara can mostly win only by re-ranking within the pool. This is a known limit.
+- **Labeling pool:** (changed 2026-10-17) you label from up to 15 shuffled candidates: the baseline's top 5, Sonara's top 5 and the 5 newest, shown without scores, or by typing a memory id. Each question row records which system proposed each candidate, so memories only Sonara finds can be credited. Marking a memory useful (including a Qwen answer) means "useful for that question", not "verified fact". Labels still favor what the two systems and recency already surface; a correct memory neither ranks in its top 5 is found only by typing its id. This is a known limit.
 - **Volume:** a 5-point gap needs roughly 150–300 eval questions to tell apart from noise, i.e. about 10 verified questions a day for several weeks.
 - **Fair baseline:** it gets the same inputs Sonara gets, including each memory's source (note, question, Qwen answer, follow-up). Its recency weight, half-life and per-source bias are tuned on the same train questions Sonara learns from, never on eval. Qwen-generated memories stay in recall; whether they help is for the feedback to show.
 
