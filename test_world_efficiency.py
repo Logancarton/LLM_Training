@@ -91,6 +91,8 @@ class ProcessingEfficiencyTests(unittest.TestCase):
         for i in range(50):
             self.owner.observe(f"Person_{i} watched bird_{i} at garden_{i}.")
         self.owner.observe("Jake moved the ball into the shed.")
+        self.assertIs(self.owner._activate_session_events("where is the ball?"), self.owner.session_events)
+        self.owner._sparse_session_activation = True
         selected = self.owner._activate_session_events("where is the ball?")
         self.assertLessEqual(len(selected), self.owner._max_active_events)
         self.assertIn("Jake placed the ball in the yard.", selected)
@@ -105,6 +107,7 @@ class ProcessingEfficiencyTests(unittest.TestCase):
     def test_crowded_causal_chain_falls_back_to_full_evidence(self):
         for i in range(40):
             self.owner.observe(f"Jake moved the ball into location_{i}.")
+        self.owner._sparse_session_activation = True
         self.assertEqual(
             self.owner._activate_session_events("where is the ball?"),
             self.owner.session_events,
