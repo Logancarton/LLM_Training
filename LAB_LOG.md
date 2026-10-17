@@ -189,3 +189,21 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **The experience part:** on shorthand questions Sonara now beats the control by 23 points overall and by 36 points in the second half: 4 more correct out of 11, all from experience inputs, with labels only from earlier train questions. This is the first clear Sonara-minus-control gap. It is still mock data I wrote, with 11 questions.
 - **Wrong answers (all 18 Sonara misses read):** in 10, "Dentist appointment is Tuesday the 21st" (the very first memory) ranks first for unrelated questions: code, coffee, rent, car, Maya, standup. The extra candidates are old notes that were often useful, and the unscaled log-seconds inputs (gap +0.49) favor old memories, so the age bias from Runs 18–19 now costs more. That's why direct questions dropped for both learners while the baseline, which ranks by cosine, held at 82%. The other misses: the Oct 31 dentist note over the Nov 20 one (3: experience holding onto the old version, as in Run 19), Planet Fitness over rent (2), the spare key or standup notes over coffee and car (3).
 - **Next, as planned:** the age bias, by scaling the log-seconds clock inputs so they can't outweigh cosine. It is now the largest single cause of Sonara misses.
+
+## 2026-10-17 · Run 21: log-seconds clock inputs scaled to about 1 per year
+
+- **Changed:** one change, decided with the user. `log_gap_seconds` and `log_life_seconds` are divided by log(1 year), so a year is about 1, like cosine. Unscaled they ran to about 14, and because Adam moves each weight by about the same step, a small weight change on them moved scores about 14 times more than the same change on cosine.
+- **Checks:** clock test updated; a week of gaps and positions stays below 1. All tests pass.
+- **Result (mock-life store, same data, re-scored), top-1 on 34 eval:**
+
+  | | baseline | control | Sonara |
+  |---|---|---|---|
+  | all | 56% | 38 → 41% | 47 → 47% |
+  | direct (17) | 82% | 53 → 59% | 47 → 41% |
+  | shorthand (17) | 29% | 24 → 24% | 47 → 53% |
+  | shorthand, 2nd half (11) | 18% | 18 → 9% | 55 → 55% |
+  | after an update (10) | 20% | 30 → 0% | 40 → 30% |
+
+  Each change here is 1–2 questions, which is noise at this size. Sonara minus control on shorthand: +29 overall, +45 in the second half.
+- **Wrong answers (all 18 Sonara misses read):** the "first memory ever" outlier is mostly gone: "Dentist appointment is Tuesday" ranks first in 3 misses, down from 10. But the bias moved instead of disappearing: "Neighbor's cat visited again." ranks first in 5, and "Spare house key" in 4. One case taken apart ("What's the garage keypad code?", asked with 6 train questions learned): the garage note has cosine 0.90 vs 0.31 for the cat note, but `same_time_of_day` was −0.47, so the note written at the same time of day as the question lost 0.94 against the evening diary note. Add day of week and a −0.32 for "shown before but not marked", and the cat note wins. **The underlying problem isn't scale; it's that 7 clock inputs pick up chance patterns while there are only a handful of labels.** The other misses: the Oct 31 dentist note over the Nov 20 one (3, experience holding onto the old version), Planet Fitness over rent (1), Maya Nov 8 over Nov 15 (1).
+- **Reading:** scaling is kept: it removes a real optimizer imbalance and the outlier. Early overfitting of the clock weights is the next thing to address. One option is to pull clock weights toward 0 unless the evidence keeps agreeing (L2 / weight decay on the clock inputs only), in line with the plan's "add capacity only as labels grow". Mock data, not evidence.

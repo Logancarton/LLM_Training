@@ -6,7 +6,7 @@ from test_sonara_recall import FakeEncoder
 import torch
 import torch.nn.functional as F
 
-from sonara import CLOCK, FEATURES, STATE_FILE, VOTE, clock_inputs, features, load_learner, run
+from sonara import CLOCK, FEATURES, LOG_YEAR, STATE_FILE, VOTE, clock_inputs, features, load_learner, run
 from sonara_recall import DEFAULT_PARAMS, TUNE_EVERY, Store, split_for
 
 
@@ -24,7 +24,7 @@ def test_clock():
             mems.append(m)
         x = clock_inputs(store, mems, now)
         col = {name: x[:, i] for i, name in enumerate(CLOCK)}
-        assert abs(col["log_gap_seconds"][4] - torch.log1p(torch.tensor(30.0))) < 1e-4  # seconds, not days
+        assert abs(col["log_gap_seconds"][4] - torch.log1p(torch.tensor(30.0)) / LOG_YEAR) < 1e-4  # seconds, not days
         assert col["same_time_of_day"][0] > 0.99 and col["same_time_of_day"][1] > 0.99  # 7 days, 1 day ago
         assert col["same_time_of_day"][2] < -0.99  # 12 hours ago: opposite side of the day
         assert col["same_day_of_week"][0] > 0.99 and col["same_day_of_week"][1] < 0.7
@@ -33,7 +33,8 @@ def test_clock():
         assert col["newer_similar"][0] > 0.99  # the same text was written again later
         assert col["newer_similar"][4] == 0.0  # nothing is newer than the latest memory
         life = torch.log1p(torch.tensor([0.0, 6 * 86400, 6.5 * 86400, 6.5 * 86400 + 60, 7 * 86400 - 30]))
-        assert torch.allclose(col["log_life_seconds"], life)  # position since the first memory
+        assert torch.allclose(col["log_life_seconds"], life / LOG_YEAR)  # position since the first memory
+        assert x[:, [0, 6]].max() < 1.0  # a week of gaps and positions stays below a year's 1
         # The incremental index matches comparing every pair, as of any second; only newer notes count.
         texts = [("garlic planted", "qwen_answer"), ("garlic planted in the bed", "user_note"),
                  ("dentist moved", "qwen_answer"), ("garlic", "user_note"), ("the bed", "qwen_answer")]

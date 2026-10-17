@@ -34,6 +34,9 @@ FEATURES = (["cosine"] + CLOCK + [f"source:{s}" for s in SOURCES]
 COS, SRC = 0, 1 + len(CLOCK)
 USEFUL, SHOWN, VOTE = SRC + len(SOURCES), SRC + len(SOURCES) + 1, SRC + len(SOURCES) + 2
 SESSION_GAP = 3600.0  # a quiet hour or more starts a new session
+# Log-seconds inputs are divided by log(1 year) so a year is about 1, like cosine. Unscaled they
+# ran to ~14 and, since Adam moves each weight by about the same step, outweighed cosine.
+LOG_YEAR = math.log1p(365 * 86400)
 PERIODS = 4
 LR = 0.01
 STEPS = 10  # learning steps per verified question
@@ -54,7 +57,7 @@ def clock_inputs(store: Store, mems: Sequence[Memory], now: float) -> torch.Tens
     the memory's own position as seconds since Sonara's first memory."""
     times = torch.tensor([m.timestamp_epoch for m in mems], dtype=torch.float64)
     x = torch.zeros(len(mems), len(CLOCK))
-    x[:, 0] = torch.log1p(now - times).float()
+    x[:, 0] = (torch.log1p(now - times) / LOG_YEAR).float()
     now_phase = torch.tensor(clock_phases(now))
     phases = torch.tensor([clock_phases(m.timestamp_epoch) for m in mems])
     x[:, 1:4] = torch.cos(2 * math.pi * (phases - now_phase))  # 1 = same point in the cycle
@@ -64,7 +67,7 @@ def clock_inputs(store: Store, mems: Sequence[Memory], now: float) -> torch.Tens
     x[:, 4] = torch.log1p(torch.tensor([len(starts) - bisect.bisect_right(starts, t) for t in times.tolist()],
                                        dtype=torch.float32))
     x[:, 5] = store.newer_similar(mems, now)
-    x[:, 6] = torch.log1p(times - timeline[0]).float()
+    x[:, 6] = (torch.log1p(times - timeline[0]) / LOG_YEAR).float()
     return x
 
 
