@@ -43,3 +43,69 @@ python3 -m unittest -q test_causal_loop
 ```
 
 CI preserves the report JSON as an artifact named `experience-learning-results`; private experimental observations/checkpoints remain Git-ignored under `learning_data/causal_runs`. This simulated environment does not imply continuous autonomous learning in the ordinary session.
+
+
+## Follow-up: two verified actions and contrastive action learning
+
+The experiment has been extended to preserve the original one-action
+baseline and *also* interact with the alternative control. Both outcomes are
+verified by the hidden simulator before entering canonical episodic memory.
+The existing world-model owner receives both (action question, outcome)
+pairs and applies a bounded supervised + pairwise ranking objective:
+
+`L = mean NLL(observed action, observed destination) + mean softplus(margin + NLL(correct action) - NLL(other action))`
+
+The ranking term asks whether, for **the same desired outcome**, the
+observed successful action scores above the verified alternative. It is not
+a generic embedding-similarity metric and does not fabricate the opposite
+action's result after the first experience. A matched supervised-only
+ablation uses the same pairs without the ranking term. False-label and
+no-gradient controls remain independent of authoritative memory.
+
+Read `action_pair_runs` and the `mean_pair_*` keys in the generated
+report for observed performance. The existing CI gate verifies executed
+feedback, weight updates, controls, and restart consistency. Passing the
+gate **does not certify decision improvement**; improvement must be measured
+against the matched supervision baseline across held-out entities and seeds.
+
+**Status:** Experimental implementation, not live-session cognition;
+action-conditioned transfer must be demonstrated empirically.
+
+
+## Three-seed replication (2026-10-16, experimental CI)
+
+[GitHub Actions run 38995589571](https://github.com/Logancarton/LLM_Training/actions/runs/38995589571)
+evaluated seeds 100–102, dimension 24, three entirely held-out
+actor/object pairs per seed, and 12 bounded replay optimizer steps after
+two verified interventions. This is 18 goal choices for each condition
+(three seeds × three novel pairs × two destination goals).
+
+| Condition | Held-out goal success |
+| --- | ---: |
+| No-gradient control | 9/18 (50.0%) |
+| After only one verified experience | 10/18 (55.6%) |
+| After two, ordinary supervised only | 18/18 (100%) |
+| After two, supervised + contrastive action loss | 18/18 (100%) |
+| After two, deliberately false swapped labels | 0/18 (0%) |
+
+The signed mean correct-action probability margin on held-out examples
+increased from about **-0.005** after the first experience to **+0.760**
+with contrastive training, versus **+0.663** with matched-step ordinary
+supervised learning. The contrastive margin was stronger in all three seeds,
+but **both methods made the same correct decisions**.
+
+All verification assertions passed, including independent provenance
+of both executed actions, no false labels in canonical memory, and
+unchanged held-out predictions after model checkpoint/restart.
+Compilation, targeted unit/integration checks, live CLI smoke, the prior
+world and experience benchmarks, and `git diff --check` also passed.
+
+**Interpretation:** Two real feedback events enable correct action
+discrimination in this bounded toy world, including on unfamiliar entity
+names. Contrast improved the *margin* in three seeds, not measured
+decision accuracy. Its loss also performs additional forward/backward
+work per optimizer step, so this comparison does not establish
+compute-normalized efficiency or stronger performance in other worlds.
+Neither treatment was enabled for ordinary chat sessions. Broader
+held-out causal structures, many seeds, and calibrated uncertainty
+remain unproven.

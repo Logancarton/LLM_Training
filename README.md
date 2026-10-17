@@ -238,3 +238,34 @@ rules, self-supervised causal discovery, autonomous computer interaction, or
 reliable single-trial generalization. An unchanged or worse held-out result
 is a valid negative experimental finding. This experimental mode does **not**
 enable world-model training in ordinary conversation.
+
+
+## Action-conditioned learning after a second verified experience (research)
+
+The original one-experience control remains unchanged. The `experience`
+benchmark now **also** executes the alternative action, records its *verified*
+outcome in the canonical memory, and trains a paired gradient objective in
+the **existing** `SonaraWorldModel` owner. Training first rewards each
+observed action's actual destination and then contrasts each destination's
+probability under the two action queries. Nothing treats an untried action's
+outcome as a verified fact.
+
+Matched controls use exactly the same first-action checkpoint and second
+observation: frozen/no-gradient, two supervised labels without contrast, and
+deliberately swapped labels (kept outside canonical memory). The report
+measures held-out goal success, destination ranking, signed correct-action
+probability margins, separation between action predictions, and equivalence
+after checkpoint/memory reload. Replay steps are *optimizer updates on two
+observations*, not additional experiences.
+
+Use:
+
+```bash
+python3 LLM_Training.py --mode experience --experience-seeds 3 --experience-dim 24 --experience-heldout 3
+python3 -m unittest -v test_causal_loop
+```
+
+This is **Integrated only into the opt-in synthetic experiment**, not the
+ordinary conversation learning loop. Contrastive gradient updates alone
+do not establish successful decisions; read the generated JSON metrics before
+claiming action-dependent transfer.
