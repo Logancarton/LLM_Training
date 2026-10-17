@@ -21,6 +21,29 @@ Qwen handles language: it reads text, turns it into vectors, and writes answers.
 - **Sonara:** a small network scores each memory from the question vector, the memory vector, the time gap, and what past feedback said about similar memories. It is trained only from verified feedback (a recalled memory was confirmed useful, or not).
 - **Qwen answers** from the top memories Sonara returns. Answer quality is measured, but recall is the target.
 
+## Sonara v1 design (proposed 2026-10-17, not built)
+
+**Feedback signal.** Each train question you label gives positives (memories you marked useful) and negatives (memories shown in the 15-candidate pool but not marked). Memories that were never shown are unknown, not negative. `answer_ok` is recorded but not trained on, since it mostly measures Qwen.
+
+**Scorer.** A linear layer (the smallest network that can be trained) scores each (question, memory) pair from 9 inputs:
+
+| Input | Baseline has it? |
+|---|---|
+| cosine(question, memory) | yes |
+| age at ask time, log days | yes |
+| source, 4 one-hot values | yes |
+| times this memory was marked useful before now | no: experience |
+| times it was shown but not marked before now | no: experience |
+| neighbor vote: max over earlier train questions q′ of cosine(question, q′), counting only q′ where this memory was marked useful | no: experience |
+
+The last three are the "what past feedback said" part. They count only train-split feedback given before the question was asked. Eval labels never become inputs.
+
+**Training.** A softmax over each train question's pool, with cross-entropy on its positives. Adam, fixed seed, retrained from scratch at each time split, and averaged over 5 seeds. The question and memory vectors enter only through cosine similarity, because a learned 1024-dimension projection would overfit a few hundred labels. Learning on top of the raw vectors would be a later change, one at a time.
+
+**Learning curve.** At each split, train on the first 25/50/75/100% of earlier train questions and score eval recall@5. "The gap grows with experience" means this curve rises while the baseline's stays flat.
+
+**Cost.** One matrix multiply over memories plus one over past questions, about 10 weights. Negligible next to one Qwen embedding.
+
 ## How it is measured (decided before building)
 
 1. **Frozen evaluation set:** questions with known correct memories, written before any training and never used for training.
