@@ -112,6 +112,22 @@ class ProcessingEfficiencyTests(unittest.TestCase):
         self.owner.clear_session()
         self.assertEqual(self.owner._session_event_terms, [])
 
+    def test_derived_caches_are_bounded_and_cleared_on_session_reset(self):
+        embedding = self.owner.model.embedding
+        for i in range(embedding._ngram_cache_capacity + 3):
+            embedding._get_buckets(f"entity_{i}")
+        self.assertEqual(len(embedding._ngram_cache), embedding._ngram_cache_capacity)
+        self.assertNotIn("entity_0", embedding._ngram_cache)
+        for i in range(self.owner.model._event_plan_capacity + 3):
+            self.owner.model._prepare_events([f"event_{i} moved into location_{i}."])
+        self.assertEqual(
+            len(self.owner.model._event_plan_cache), self.owner.model._event_plan_capacity
+        )
+        self.owner.observe("I moved the ball into the shed.")
+        self.owner.clear_session()
+        self.assertEqual(len(self.owner.model._event_plan_cache), 0)
+        self.assertEqual(len(embedding._ngram_cache), 0)
+
     def test_replay_persists_and_old_checkpoint_is_rejected_before_state_mutation(self):
         self.owner.learn_step(self.events, "where is the ball?", "yard")
         with tempfile.TemporaryDirectory() as tmp:
