@@ -170,3 +170,22 @@ One entry per run: what changed, result, what the wrong answers showed.
   - *Outside the candidate set (4):* PR, car due, Dr. Lee, the usual, as in Run 18.
   - *Wrong but nearby (5):* "car made a weird noise" over "oil change due" (3), "Planet Fitness" over rent (1), diary notes (2).
 - **Reading:** this fix was needed: the input now means "replaced". On its own, Sonara is still level with the control and below the baseline overall. Next, as planned: the candidate set (so experience can reach shorthand memories), then the age bias. The pull between experience and updates is a new finding to keep watching. These are my mock data, not evidence.
+
+## 2026-10-17 · Run 20: the candidate set includes what experience links to the question
+
+- **Changed:** one change, decided with the user. The shared candidate set (top 50 by cosine + 10 newest) now also includes the memories marked useful for the 5 most similar earlier *train* questions. Eval labels are never used, and only questions asked before count. Every method ranks from this set, the baseline included. Before this, memories that only experience links to a question ("What's my PR?" → the run note) couldn't be ranked at all.
+- **Checks:** a memory that cosine misses joins the set once it's marked useful for a similar earlier train question. The same label on an eval question doesn't pull it in, and neither does a question asked later.
+- **Result (mock-life store, same data, re-scored), top-1 on 34 eval:**
+
+  | | baseline | control | Sonara |
+  |---|---|---|---|
+  | all | 56 → 56% | 47 → 38% | 47 → 47% |
+  | direct (17) | 82 → 82% | 71 → 53% | 59 → 47% |
+  | shorthand (17) | 29 → 29% | 24 → 24% | 35 → 47% |
+  | shorthand, 2nd half (11) | 18 → 18% | 18 → 18% | 36 → 55% |
+  | after an update (10) | 20 → 20% | 30 → 30% | 30 → 40% |
+
+  Correct memory in the candidate set: 30/34 → 33/34. Experience weights grew (vote +1.24 → +1.58, useful +0.46 → +0.75).
+- **The experience part:** on shorthand questions Sonara now beats the control by 23 points overall and by 36 points in the second half: 4 more correct out of 11, all from experience inputs, with labels only from earlier train questions. This is the first clear Sonara-minus-control gap. It is still mock data I wrote, with 11 questions.
+- **Wrong answers (all 18 Sonara misses read):** in 10, "Dentist appointment is Tuesday the 21st" (the very first memory) ranks first for unrelated questions: code, coffee, rent, car, Maya, standup. The extra candidates are old notes that were often useful, and the unscaled log-seconds inputs (gap +0.49) favor old memories, so the age bias from Runs 18–19 now costs more. That's why direct questions dropped for both learners while the baseline, which ranks by cosine, held at 82%. The other misses: the Oct 31 dentist note over the Nov 20 one (3: experience holding onto the old version, as in Run 19), Planet Fitness over rent (2), the spare key or standup notes over coffee and car (3).
+- **Next, as planned:** the age bias, by scaling the log-seconds clock inputs so they can't outweigh cosine. It is now the largest single cause of Sonara misses.

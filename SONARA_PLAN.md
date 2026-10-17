@@ -10,7 +10,7 @@
 | Top-1 target metric, recall@5 and `answer_ok` alongside | yes | `curve` | yes | no |
 | Incremental `newer_similar`, newer notes only (saved, linear per memory) | yes | Sonara inputs | yes | matches N x N in tests |
 | Saved learner state, replay on feature/code change | yes | `chat` | yes | saved == replayed in tests |
-| Bounded candidate set (top 50 cosine + 10 newest), shared | yes | baseline, Sonara, `chat` | yes | no |
+| Bounded candidate set (top 50 cosine + 10 newest + memories useful for the 5 most similar earlier train questions), shared | yes | baseline, Sonara, `chat` | yes | no |
 | Shadow ranking in `chat` (both rankings logged; learns live from train only) | yes | `chat` | yes | no |
 | Union labeling pool (baseline top 5 + Sonara top 5 + 5 newest, proposers recorded) | yes | `chat` | yes | no |
 

@@ -91,6 +91,20 @@ def test_recall():
         assert len(pool) <= POOL_COSINE + POOL_NEWEST and old in pool
         newest = sorted(store.before(20 * day), key=lambda m: m.timestamp_epoch)[-POOL_NEWEST:]
         assert all(m in pool for m in newest)
+        # A memory cosine misses joins the set once it was marked useful for a similar earlier train
+        # question; the same label on an eval question never pulls it in.
+        hidden = store.add("key under the blue flowerpot", "user_note")
+        hidden.timestamp_epoch = 1 * day
+        ask = "locked out, where do I look"
+        for i in range(POOL_COSINE + 5):  # more look-alikes than the cosine part of the set holds
+            store.add(f"where do I look {i}", "user_note").timestamp_epoch = 2 * day
+        assert hidden not in candidates(store, ask, 20 * day)
+        ids = {s: next(f"{s}{i}" for i in range(99) if split_for(f"{s}{i}") == s) for s in ("train", "eval")}
+        store.add_question(ids["eval"], "locked out again, where do I look", 18 * day, [hidden.id], [], None)
+        assert hidden not in candidates(store, ask, 20 * day)  # eval labels are never used
+        store.add_question(ids["train"], "locked out again, where do I look", 19 * day, [hidden.id], [], None)
+        assert hidden in candidates(store, ask, 20 * day)
+        assert hidden not in candidates(store, ask, 19 * day)  # only questions asked before count
 
         # The labeling pool unions each system's top 5 with the newest and records who proposed what.
         ranked = baseline_rank(store, "what did Jake like", 20 * day)

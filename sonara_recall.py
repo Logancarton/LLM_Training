@@ -41,8 +41,8 @@ BIAS_GRID = (-1.6, -0.8, -0.4, -0.2, -0.1, 0.0, 0.1, 0.4)
 REFERENCE_SOURCE = "user_note"
 CHUNK = 20000  # settings combinations scored at once
 TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
-POOL_COSINE, POOL_NEWEST = 50, 10
-NOTE_SOURCES = ("user_note", "user_observation")  # written by the user, not restated by Qwen  # the bounded candidate set every method ranks from
+POOL_COSINE, POOL_NEWEST, POOL_NEIGHBORS = 50, 10, 5  # the bounded candidate set every method ranks from
+NOTE_SOURCES = ("user_note", "user_observation")  # written by the user, not restated by Qwen
 
 
 def split_for(question_id: str) -> str:
@@ -130,20 +130,33 @@ class Store:
         torch.save(self._newer, self.newer_path)
 
     def similarities(self, question: str, mems: Sequence[Memory]) -> torch.Tensor:
-        vecs = torch.nn.functional.normalize(self.encoder.vectors([m.content for m in mems]), dim=1)
+        return self.text_similarities(question, [m.content for m in mems])
+
+    def text_similarities(self, question: str, texts: Sequence[str]) -> torch.Tensor:
+        vecs = torch.nn.functional.normalize(self.encoder.vectors(list(texts)), dim=1)
         q = torch.nn.functional.normalize(self.encoder.vectors([question])[0], dim=0)
         return vecs @ q
 
 
 def candidates(store: Store, question: str, asked_epoch: float) -> List[Memory]:
-    """The bounded set every method ranks from: the top POOL_COSINE memories by cosine plus the
-    POOL_NEWEST newest, written before the question."""
+    """The bounded set every method ranks from, written before the question: the top POOL_COSINE
+    memories by cosine, the POOL_NEWEST newest, and the memories marked useful for the
+    POOL_NEIGHBORS most similar earlier train questions (so memories that only experience
+    links to the question can be ranked at all; eval labels are never used)."""
     mems = store.before(asked_epoch)
     if len(mems) <= POOL_COSINE + POOL_NEWEST:
         return mems
     top = [mems[i] for i in store.similarities(question, mems).argsort(descending=True)[:POOL_COSINE].tolist()]
     newest = sorted(mems, key=lambda m: m.timestamp_epoch, reverse=True)[:POOL_NEWEST]
-    return list({m.id: m for m in top + newest}.values())
+    past = [q for q in store.questions()
+            if q["split"] == "train" and q["correct_ids"] and q["asked_epoch"] < asked_epoch]
+    known = {m.id: m for m in mems}
+    useful = []
+    if past:
+        sims = store.text_similarities(question, [q["question"] for q in past])
+        for i in sims.argsort(descending=True)[:POOL_NEIGHBORS].tolist():
+            useful += [known[mid] for mid in past[i]["correct_ids"] if mid in known]
+    return list({m.id: m for m in top + newest + useful}.values())
 
 
 def baseline_scores(store: Store, question: str, asked_epoch: float,
