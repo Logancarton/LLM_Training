@@ -6,13 +6,18 @@ A small learner that builds on experience over time. Qwen (run locally through O
 
 - `sonara_memory.py`: append-only, timestamped memory of events, with retrieval and a CLI.
 - `sonara_text_encoder.py`: frozen Qwen embedding vectors from local Ollama (loopback only), cached.
-- `test_sonara_memory.py`: memory tests.
+- `sonara_recall.py`: chat with Qwen while logging experience, the fixed recall baseline, and recall@5 scoring.
+- `test_sonara_memory.py`, `test_sonara_recall.py`: tests (no Ollama needed).
+- `LAB_LOG.md`: one entry per run.
 
 ## Setup
 
 ```bash
 ollama pull qwen3-embedding:0.6b
-python3 test_sonara_memory.py
+ollama pull qwen2.5:1.5b-instruct
+python3 test_sonara_memory.py && python3 test_sonara_recall.py
+python3 sonara_recall.py chat     # ask questions, mark useful memories
+python3 sonara_recall.py score    # baseline recall@5 on the frozen eval questions
 ```
 
 Earlier world-model experiments and their reports are in git history (branch `research/world-model-learned-lexicon`).

@@ -29,9 +29,13 @@ Qwen handles language: it reads text, turns it into vectors, and writes answers.
 4. **Success:** Sonara beats the fixed baseline by at least 5 points recall@5 on all 3 splits, and the gap grows as experience grows. Anything less is reported as no effect.
 5. **Every run:** change one thing; read 20 wrong answers before drawing conclusions; add one entry to a lab log.
 
-## Open decision before building
+## Where experience comes from (decided 2026-10-17)
 
-Where does experience come from? Real logged experience is slow to accumulate but honest; synthetic stories are fast but taught us today that models learn the generator's shortcuts. Recommended: log real notes for 2–4 weeks while building the pipeline, and use synthetic data only to test that the code runs.
+Real use. You ask Qwen questions in `sonara_recall.py chat`. The baseline recalls memories, Qwen answers from them, and you mark which memories were actually useful. The question, the answer and any notes are stored as timestamped memories. Each verified question is assigned to train or eval when it is written (1 in 3 eval, by id hash), so the eval set is frozen and never trained on. Synthetic data is used only in tests.
+
+- **Labeling pool:** you label from 15 shuffled candidates (top 10 by similarity + 5 most recent), shown without scores, or by typing a memory id. Labels found this way favor what similarity and recency already surface, so Sonara can mostly win only by re-ranking within the pool. This is a known limit.
+- **Volume:** a 5-point gap needs roughly 150–300 eval questions to tell apart from noise, i.e. about 10 verified questions a day for several weeks.
+- **Fair baseline:** its recency weight and half-life are tuned by grid search on the same train questions Sonara learns from, and never on eval.
 
 ## What the earlier experiments taught us
 
