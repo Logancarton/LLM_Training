@@ -129,3 +129,23 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Result (trial store, my data, not evidence), top-1 by period:** baseline 50 / 100 / 50% (Run 16: 50 / 50 / 0%). Sonara and the control: 50 / 100 / 100%. After 20 train questions the tuned settings are recency 0.4 with a 1-day half-life, newer −0.8, and generated sources −0.8.
 - **Wrong answers (2 baseline top-1 misses on eval):** "What day do I see the dentist?" was asked before the tuner had 10 labels, so the default settings rank an earlier question first. In "What's my gym membership cost?", "Planet Fitness $25" still beats "Crunch $55" (the correct note is second). The gap between baseline and Sonara is now one question. Sonara minus control is still 0, so nothing so far comes from experience.
 - **Cost:** with 5 sources (your real store has one legacy `user_observation` memory), a tune takes about 16 s at 300 train questions. `chat` re-tunes every 10 labels, so that's an occasional pause.
+
+## 2026-10-17 · Run 18: mock life, 15 simulated days of timestamped use (real Qwen, trial store)
+
+- **Changed:** nothing in the code. I played the user through `chat` with real Qwen, in `learning_data/sonara_mock_life`. A simulated clock gave every memory and question a real timeline: morning and evening sessions from Oct 20 to Nov 3, a few minutes between actions. Each day had diary notes and fact notes, and 7 of 11 facts changed on set days (dentist twice, run twice, book, garage code, standup, gym, Maya). Questions came in two kinds. *Direct* ones are worded like the note. *Shorthand* ones use words the note lacks ("When do I see Dr. Lee?", "What's the usual?", "What's my PR?", "Where's the spare?"). Labels were the note current when asked. The planned 21 days stopped at day 15, when an Ollama call hung for 600 s. **Mock data I wrote, not evidence.**
+- **Data:** 96 questions (62 train, 34 eval), 330+ memories. `answer_ok` 27/34.
+- **Curve, top-1 by period:** baseline 67 / 89 / 33 / 14%, control 22 / 78 / 44 / 14%, Sonara 22 / 67 / 56 / 29%. By kind:
+
+  | eval questions | n | baseline | control | Sonara | correct in candidates |
+  |---|---|---|---|---|---|
+  | direct | 17 | 82% | 59% | 59% | 17/17 |
+  | shorthand | 17 | 24% | 24% | 29% | 13/17 |
+  | shorthand, second half | 11 | 9% | 18% | 36% | |
+  | after a fact changed | 10 | 10% | 20% | 30% | 8/10 |
+
+- **First sign of experience:** for the first time the experience weights came out positive (neighbor vote +1.24, useful count +0.46, shown-not-useful −1.08). In the second half, Sonara got shorthand questions the control missed ("What's my distance record?" → the run note). That's only 2 questions out of 11, so it is a direction, not a result.
+- **Wrong answers (all 22 eval misses read), three structural problems:**
+  1. **Age bias (9 misses).** Sonara and the control often put the *first* memory ever written ("Dentist appointment is Tuesday the 21st") first for unrelated questions (rent, garage code, coffee, standup, Maya). Their clock inputs learned "older notes are useful" (gap +0.38, life position +0.31, time of year +0.55): in this mock most labeled facts were written early and the diary notes came later. That correlation is in the data, not about time. This is why they trail the baseline on direct questions (59% vs 82%).
+  2. **`newer_similar` no longer means "replaced" (5 misses).** The old version still wins after updates (rent $1450, dentist Oct 31, Maya Nov 8). Sonara's `newer_similar` weight went *positive* (+0.18). Every useful fact gets restated by later Qwen questions, answers and follow-ups, so a high `newer_similar` now marks a memory that gets talked about, not one that was replaced. The baseline inherits the same input.
+  3. **The candidate set hides what only experience finds (4 misses).** For "What's my PR?", "When's the car due?", "When's my thing with Dr. Lee?" and "What's the usual?", the correct note wasn't in the top 50 by cosine or the 10 newest, so no method could rank it. Experience can't help with a memory it never sees.
+- **Possible next changes, one at a time:** (2) compute `newer_similar` only against newer *notes*, so Qwen's restatements don't count; (3) add memories marked useful for similar past train questions to the shared candidate set; (1) look at the age bias again after those two, because part of it may come from them.
