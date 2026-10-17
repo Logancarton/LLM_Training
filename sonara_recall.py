@@ -32,10 +32,14 @@ CHAT_MODEL = "qwen2.5:1.5b-instruct"
 CHAT_ENDPOINT = "http://127.0.0.1:11434/api/chat"
 K = 5
 # Recency weight, half-life in days, "newer" (weight on newer_similar, default 0), and
-# "bias:<source>" (default 0) per memory source.
+# "bias:<source>" (default 0) per memory source, relative to notes (only differences between
+# source biases change a ranking, so notes stay at 0). Wide enough to match what Sonara learns.
 DEFAULT_PARAMS = {"weight": 0.1, "half_life": 7.0}
-GRID = {"weight": (0.0, 0.05, 0.1, 0.2, 0.4), "half_life": (1.0, 7.0, 30.0), "newer": (-0.4, -0.2, -0.1, 0.0)}
-BIAS_GRID = (-0.4, -0.2, -0.1, 0.0, 0.1)
+GRID = {"weight": (0.0, 0.05, 0.1, 0.2, 0.4), "half_life": (1.0, 7.0, 30.0),
+        "newer": (-1.6, -0.8, -0.4, -0.2, -0.1, 0.0)}
+BIAS_GRID = (-1.6, -0.8, -0.4, -0.2, -0.1, 0.0, 0.1, 0.4)
+REFERENCE_SOURCE = "user_note"
+CHUNK = 20000  # settings combinations scored at once
 TUNE_EVERY = 10  # labeled train questions between baseline re-tunes
 POOL_COSINE, POOL_NEWEST = 50, 10  # the bounded candidate set every method ranks from
 
@@ -166,31 +170,43 @@ def hit(ranked: Sequence[Memory], correct_ids: Sequence[str], k: int = K) -> boo
 
 def tune(store: Store, train: List[Dict]) -> Dict[str, float]:
     """Try every combination of the baseline's settings on train questions only and keep the
-    one with the most top-1 hits (the target), then the most recall@5 hits; ties keep the defaults. Each question's cosines, ages and sources
-    are computed once, then all combinations are scored together."""
+    one with the most top-1 hits (the target), then the most recall@5 hits, then the widest
+    margin between correct and other memories (as Sonara's cross-entropy rewards); exact ties go
+    to the settings closest to the defaults. Each question's cosines, ages and sources are computed once, then all
+    combinations are scored in chunks."""
     params = dict(DEFAULT_PARAMS)
     if not train:
         return params
-    sources = sorted({m.source for m in store.memory.memories.values()})
-    keys = list(GRID) + ["bias:" + s for s in sources]
-    combos = torch.tensor(list(itertools.product(*GRID.values(), *[BIAS_GRID] * len(sources))), dtype=torch.float64)
-    hits = torch.zeros(len(combos))
+    free = sorted({m.source for m in store.before(math.inf)} - {REFERENCE_SOURCE})
+    keys = list(GRID) + ["bias:" + s for s in free]
+    combos = torch.tensor(list(itertools.product(*GRID.values(), *[BIAS_GRID] * len(free))), dtype=torch.float64)
+    biases = torch.cat([combos[:, 3:], torch.zeros(len(combos), 1, dtype=torch.float64)], dim=1)  # last: notes
+    top1, top5, margin = (torch.zeros(len(combos), dtype=torch.float64) for _ in range(3))
     for q in train:
         mems = candidates(store, q["question"], q["asked_epoch"])
         correct = torch.tensor([m.id in q["correct_ids"] for m in mems], dtype=torch.bool)
         if not correct.any():
             continue
         age_days = torch.tensor([(q["asked_epoch"] - m.timestamp_epoch) / 86400 for m in mems])
-        src = torch.tensor([sources.index(m.source) for m in mems])
-        recency = torch.exp(-math.log(2) * age_days[None, :] / combos[:, 1:2])
-        newer = combos[:, 2:3] * store.newer_similar(mems, q["asked_epoch"])[None, :]
-        scores = store.similarities(q["question"], mems) + combos[:, 0:1] * recency + newer + combos[:, 3:][:, src]
-        above = (scores > scores[:, correct].max(dim=1).values[:, None]).sum(dim=1)
-        hits += (above == 0).float() * (len(train) + 1) + (above < K).float()
-    default = [params.get(k, 0.0) for k in keys]
-    best = int((combos == torch.tensor(default, dtype=torch.float64)).all(dim=1).nonzero()[0])
-    if hits.max() > hits[best]:
-        best = int(hits.argmax())
+        src = torch.tensor([free.index(m.source) if m.source in free else len(free) for m in mems])
+        cos = store.similarities(q["question"], mems)
+        newer_sim = store.newer_similar(mems, q["asked_epoch"])
+        for i in range(0, len(combos), CHUNK):
+            c = combos[i:i + CHUNK]
+            recency = torch.exp(-math.log(2) * age_days[None, :] / c[:, 1:2])
+            scores = cos + c[:, 0:1] * recency + c[:, 2:3] * newer_sim[None, :] + biases[i:i + CHUNK][:, src]
+            best_correct = scores[:, correct].max(dim=1).values
+            above = (scores > best_correct[:, None]).sum(dim=1)
+            top1[i:i + CHUNK] += (above == 0).double()
+            top5[i:i + CHUNK] += (above < K).double()
+            if (~correct).any():  # capped so no single question dominates
+                gap = best_correct - scores[:, ~correct].max(dim=1).values
+                margin[i:i + CHUNK] += gap.clamp(-1.0, 1.0)
+    keep = torch.ones(len(combos), dtype=torch.bool)
+    for objective in (top1, top5, margin):
+        keep &= objective == objective[keep].max()
+    default = torch.tensor([params.get(k, 0.0) for k in keys], dtype=torch.float64)
+    best = int(torch.where(keep, (combos - default).abs().sum(dim=1), math.inf).argmin())
     return {k: v for k, v in zip(keys, combos[best].tolist()) if k in DEFAULT_PARAMS or v != 0.0}
 
 
