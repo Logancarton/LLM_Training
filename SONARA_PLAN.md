@@ -50,7 +50,7 @@ The last three are the "what past feedback said" part. They count only train-spl
 
 Time is one continuous progression, not just stamps on events. Every time Sonara runs, it reads "now" to the second, and every memory is a point on that same timeline. Nothing runs in the background; elapsed time and quiet periods are computed from the clock when Sonara is used. Event dates are not pulled out of the text.
 
-- **Clock inputs:** where now sits and where each memory sits (time of day, day of week, time of year, as cycles), plus the elapsed time between them in log-seconds.
+- **Clock inputs:** where now sits and where each memory sits (time of day, day of week, time of year, as cycles), plus the elapsed time between them in log-seconds. Also each memory's absolute position: seconds since Sonara's first memory, in log scale.
 - **Progression inputs:** how many sessions have started between the memory and now (a quiet hour or more starts a new session, judged from memory timestamps), and how similar the most similar newer memory is.
 - **Growth:** add the learner's capacity only as labels grow, and keep the no-experience control at every step, so the curve shows whether time is actually learned.
 

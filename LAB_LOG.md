@@ -49,3 +49,10 @@ One entry per run: what changed, result, what the wrong answers showed.
 - **Data:** Run 1's 20 questions (14 train, 6 eval). This checks the code only.
 - **Result by period** (2 eval questions each; only 3 periods with 6 questions): Sonara 50 / 50 / 100%, baseline 100 / 50 / 100%. The control and rule match the baseline. In the synthetic test's later half, Sonara got 86%, the control 43% and the baseline 57%.
 - **Wrong answers:** both of Sonara's misses ("why wouldn't my vehicle start", "longest run") have top 5s padded with the oldest notes ("Started the Sonara project", the first dentist booking). After a few big steps on few questions, the weights favor older memories (log gap +0.34, time of year +2.0) and rank below its own cosine-only start. This is online-learning noise: lr 0.05 × 10 steps moves the weights a lot on each question. A slower learning rate would be the next single change, chosen before seeing new data, not tuned on this set.
+
+## 2026-10-17 · Run 7: absolute timeline position
+
+- **Changed:** one change. A new clock input, `log_life_seconds`: seconds from Sonara's first memory to this memory, log scale. Same online learner and data as Run 6.
+- **Result by period:** Sonara 50 / 50 / 100% (same as Run 6). The control dropped to 50% in period 1 (it was 100%). The baseline got 100 / 50 / 100%.
+- **Weights:** life position +1.1, so later memories are favored. Time of year fell from +2.0 to +0.6 and newer-similar from −2.1 to −1.8. The new input took over part of what the cycles were absorbing.
+- **Wrong answers:** the same two misses. "Longest run" now ranks running notes in its top 5 ("Ran 10 km", the half marathon, the shoes) instead of the Sonara-start note, but still not the 18 km note. "Vehicle start" still ranks the brake notes above the battery notes. The early-period drop is still the online step size (Run 6), not the new input.

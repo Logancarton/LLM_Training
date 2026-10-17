@@ -32,6 +32,8 @@ def test_clock():
         assert col["log_sessions_between"].tolist() == torch.log1p(torch.tensor([3.0, 2.0, 1.0, 1.0, 0.0])).tolist()
         assert col["newer_similar"][0] > 0.99  # the same text was written again later
         assert col["newer_similar"][4] == 0.0  # nothing is newer than the latest memory
+        life = torch.log1p(torch.tensor([0.0, 6 * 86400, 6.5 * 86400, 6.5 * 86400 + 60, 7 * 86400 - 30]))
+        assert torch.allclose(col["log_life_seconds"], life)  # position since the first memory
     finally:
         shutil.rmtree(tmp)
     print("✓ clock tests passed")

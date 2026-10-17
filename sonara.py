@@ -25,10 +25,11 @@ from sonara_recall import DEFAULT_PARAMS, K, Store, baseline_rank, baseline_scor
 
 SOURCES = ("user_note", "user_question", "qwen_answer", "qwen_follow_up")
 CLOCK = ["log_gap_seconds", "same_time_of_day", "same_day_of_week", "same_time_of_year",
-         "log_sessions_between", "newer_similar"]
+         "log_sessions_between", "newer_similar", "log_life_seconds"]
 FEATURES = (["cosine"] + CLOCK + [f"source:{s}" for s in SOURCES]
             + ["log_useful", "log_shown_not_useful", "neighbor_vote"])
-COS, SRC, USEFUL, SHOWN, VOTE = 0, 1 + len(CLOCK), 11, 12, 13
+COS, SRC = 0, 1 + len(CLOCK)
+USEFUL, SHOWN, VOTE = SRC + len(SOURCES), SRC + len(SOURCES) + 1, SRC + len(SOURCES) + 2
 SESSION_GAP = 3600.0  # a quiet hour or more starts a new session
 PERIODS = 4
 LR = 0.05
@@ -45,7 +46,8 @@ def clock_phases(epoch: float) -> Tuple[float, float, float]:
 
 
 def clock_inputs(mems: Sequence[Memory], vecs: torch.Tensor, now: float) -> torch.Tensor:
-    """(N, 6) day-clock inputs for memories, relative to now on one continuous timeline."""
+    """(N, 7) day-clock inputs for memories on one continuous timeline: relative to now, and
+    the memory's own position as seconds since Sonara's first memory."""
     times = torch.tensor([m.timestamp_epoch for m in mems], dtype=torch.float64)
     x = torch.zeros(len(mems), len(CLOCK))
     x[:, 0] = torch.log1p(now - times).float()
@@ -59,6 +61,7 @@ def clock_inputs(mems: Sequence[Memory], vecs: torch.Tensor, now: float) -> torc
     newer = times[None, :] > times[:, None]  # [i, j]: memory j was written after memory i
     sims = (vecs @ vecs.T).masked_fill(~newer, -1.0)
     x[:, 5] = sims.max(dim=1).values.clamp(min=0.0)
+    x[:, 6] = torch.log1p(times - times.min()).float()
     return x
 
 
