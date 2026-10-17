@@ -1,8 +1,8 @@
 # Sonara temporal world-model efficiency — controlled research
 
-**Repository:** `Logancarton/LLM_Training`  
-**Experimental base:** draft PR #9 (`research/temporal-action-integration`)  
-**Implementation:** draft PR #10 (`research/efficient-temporal-world-model`)  
+**Repository:** `Logancarton/LLM_Training`
+**Experimental base:** draft PR #9 (`research/temporal-action-integration`)
+**Implementation:** draft PR #10 (`research/efficient-temporal-world-model`)
 **Status:** Built and tested in the synthetic research path; **not merged or enabled by default**.
 
 ## Ownership and active path
