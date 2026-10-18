@@ -435,6 +435,47 @@ class SonaraMemorySystem:
 
 
 # =====================================================================
+# 4b. TOKEN STORE: every word, with every timestamp it was used at
+# =====================================================================
+
+TOKEN_RE = re.compile(r"[a-z0-9]+(?:[:.,'][a-z0-9]+)*")  # words and numbers like 9:30, 1,450, don't
+
+
+def tokenize(text: str) -> List[str]:
+    return TOKEN_RE.findall(text.lower())
+
+
+class TokenStore:
+    """A new token gets the next place; a returning token only gets another timestamp and the
+    id of the message it came from. Built from memories in time order and saved; rebuilt if an
+    older memory appears or a timestamp changes."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        data = json.loads(self.path.read_text()) if self.path.exists() else {}
+        self.order: List[List[Any]] = data.get("order", [])  # [memory id, epoch] already added
+        self.tokens: Dict[str, Dict[str, list]] = data.get("tokens", {})  # insertion order = place
+
+    def update(self, memories: List[Memory]) -> None:
+        mems = sorted(memories, key=lambda m: m.timestamp_epoch)
+        order = [[m.id, m.timestamp_epoch] for m in mems]
+        if order[:len(self.order)] != self.order:
+            self.order, self.tokens = [], {}
+        if len(order) == len(self.order):
+            return
+        for m in mems[len(self.order):]:
+            for tok in tokenize(m.content):
+                entry = self.tokens.setdefault(tok, {"times": [], "memory_ids": []})
+                entry["times"].append(m.timestamp_epoch)
+                entry["memory_ids"].append(m.id)
+        self.order = order
+        self.path.write_text(json.dumps({"order": self.order, "tokens": self.tokens}))
+
+    def place(self, token: str) -> int:
+        return list(self.tokens).index(token)
+
+
+# =====================================================================
 # 5. CLI INTERFACE & DEMONSTRATION
 # =====================================================================
 

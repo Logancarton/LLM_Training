@@ -55,6 +55,27 @@ def clock_phases(epoch: float) -> Tuple[float, float, float]:
     return day, (t.weekday() + day) / 7, (t.timetuple().tm_yday - 1 + day) / 365.25
 
 
+YEAR_SECONDS = 365.25 * 86400
+TIME_ORIGIN = dt.datetime(2026, 1, 1).timestamp()
+
+
+def time_vector(epoch: float) -> torch.Tensor:
+    """A date and time as 7 numbers: time of day, day of week and time of year as cycles
+    (sin, cos), and years since 2026-01-01."""
+    phases = torch.tensor(clock_phases(epoch), dtype=torch.float64) * 2 * math.pi
+    return torch.cat([torch.stack([phases.sin(), phases.cos()], dim=1).flatten(),
+                      torch.tensor([(epoch - TIME_ORIGIN) / YEAR_SECONDS], dtype=torch.float64)]).float()
+
+
+def occurrence_vectors(store: Store, token: str, now: float) -> torch.Tensor:
+    """One vector per time the token was used before now: its Qwen vector plus that date and time."""
+    times = [t for t in store.tokens().tokens.get(token, {"times": []})["times"] if t < now]
+    vec = F.normalize(store.encoder.vectors([token])[0], dim=0)
+    if not times:
+        return torch.zeros(0, len(vec) + 7)
+    return torch.cat([vec.expand(len(times), -1), torch.stack([time_vector(t) for t in times])], dim=1)
+
+
 def clock_inputs(store: Store, mems: Sequence[Memory], now: float) -> torch.Tensor:
     """(N, 7) day-clock inputs for memories on one continuous timeline: relative to now, and
     the memory's own position as seconds since Sonara's first memory."""

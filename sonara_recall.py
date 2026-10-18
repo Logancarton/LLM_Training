@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
-from sonara_memory import Memory, SonaraMemorySystem
+from sonara_memory import Memory, SonaraMemorySystem, TokenStore
 from sonara_text_encoder import PretrainedTextEncoder
 
 CHAT_MODEL = "qwen2.5:1.5b-instruct"
@@ -58,6 +58,7 @@ class Store:
         self.vectors_path = self.dir / "vectors.pt"
         self.questions_path = self.dir / "questions.jsonl"
         self.newer_path = self.dir / "newer_similar.pt"
+        self._tokens = TokenStore(self.dir / "tokens.json")
         self._newer = torch.load(self.newer_path) if self.newer_path.exists() else {}
         self.encoder = encoder or PretrainedTextEncoder(cache_path=self.vectors_path)
         if self.encoder.ensure(m.content for m in self.memory.memories.values()):
@@ -92,6 +93,11 @@ class Store:
     def before(self, epoch: float) -> List[Memory]:
         return [m for m in self.memory.memories.values()
                 if m.timestamp_epoch < epoch and m.source != "sonara_reflection"]
+
+    def tokens(self) -> TokenStore:
+        """Every token with every timestamp it was used at, up to date with the memory log."""
+        self._tokens.update(self.before(math.inf))
+        return self._tokens
 
     def newer_similar(self, mems: Sequence[Memory], now: float) -> torch.Tensor:
         """For each memory, its highest cosine (at least 0) to a note written after it and before now.

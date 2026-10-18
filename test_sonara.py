@@ -1,4 +1,5 @@
 """test_sonara.py — Sonara v1 learns from feedback where cosine misleads (fake encoder, no Ollama)."""
+import datetime as dt
 import shutil
 import tempfile
 
@@ -6,7 +7,8 @@ from test_sonara_recall import FakeEncoder
 import torch
 import torch.nn.functional as F
 
-from sonara import CLOCK, CLOCK_DECAY, FEATURES, LOG_YEAR, LR, STATE_FILE, STEPS, VOTE, Learner, clock_inputs, features, load_learner, run
+from sonara import (CLOCK, CLOCK_DECAY, FEATURES, LOG_YEAR, LR, STATE_FILE, STEPS, VOTE, Learner, clock_inputs, features,
+                    load_learner, occurrence_vectors, run, time_vector)
 from sonara_recall import DEFAULT_PARAMS, TUNE_EVERY, Store, split_for
 
 
@@ -175,7 +177,38 @@ def test_shadow_chat():
         shutil.rmtree(tmp)
     print("✓ shadow chat tests passed")
 
+def test_tokens():
+    """A new token gets a new place, a returning token only a timestamp; each use becomes a vector
+    with its date and time."""
+    from sonara_memory import TokenStore, tokenize
+    tmp = tempfile.mkdtemp()
+    try:
+        store = Store(tmp, encoder=FakeEncoder())
+        noon = dt.datetime(2026, 7, 16, 12, 0).timestamp()
+        first = store.add("Dentist moved to Friday 9:30", "user_note")
+        again = store.add("dentist again", "qwen_answer")
+        first.timestamp_epoch, again.timestamp_epoch = noon, noon + 86400 * 1.5
+        assert tokenize("Rent is $1,450 at 9:30, don't") == ["rent", "is", "1,450", "at", "9:30", "don't"]
+        tokens = store.tokens()
+        assert list(tokens.tokens) == ["dentist", "moved", "to", "friday", "9:30", "again"]  # places
+        assert tokens.tokens["dentist"] == {"times": [noon, noon + 86400 * 1.5], "memory_ids": [first.id, again.id]}
+        store.add("Friday dentist", "user_question").timestamp_epoch = noon + 86400 * 3
+        assert len(store.tokens().tokens) == 6 and len(store.tokens().tokens["friday"]["times"]) == 2  # no new place
+        assert TokenStore(store.dir / "tokens.json").tokens == store.tokens().tokens  # saved and reloaded
+
+        occ = occurrence_vectors(store, "dentist", noon + 86400 * 2)  # the use on day 3 isn't known yet
+        assert occ.shape == (2, 64 + 7) and torch.allclose(occ[0, 64:], time_vector(noon))
+        assert torch.allclose(occ[0, :64], occ[1, :64]) and not torch.allclose(occ[0, 64:], occ[1, 64:])
+        tv, midnight = time_vector(noon), time_vector(noon + 12 * 3600)
+        assert tv[1] < -0.99 and midnight[1] > 0.99  # time of day: noon vs midnight on the cycle
+        assert abs(tv[6] - (noon - dt.datetime(2026, 1, 1).timestamp()) / (365.25 * 86400)) < 1e-5
+    finally:
+        shutil.rmtree(tmp)
+    print("✓ token tests passed")
+
+
 if __name__ == "__main__":
     test_clock()
     test_sonara()
     test_shadow_chat()
+    test_tokens()

@@ -13,6 +13,8 @@
 | Bounded candidate set (top 50 cosine + 10 newest + memories useful for the 5 most similar earlier train questions), shared | yes | baseline, Sonara, `chat` | yes | no |
 | Shadow ranking in `chat` (both rankings logged; learns live from train only) | yes | `chat` | yes | no |
 | Union labeling pool (baseline top 5 + Sonara top 5 + 5 newest, proposers recorded) | yes | `chat` | yes | no |
+| Experiment 2 token store (token places + timestamps) and occurrence vectors (token vector + date/time) | yes | not yet (no learner) | no | tests only |
+| Experiment 2 learner (trains only on occurrence vectors) | no | | | |
 
 ## Goal
 
@@ -23,6 +25,17 @@ Qwen handles language: it reads text, turns it into vectors, and writes answers.
 | Job | Read, embed, answer | Remember, relate, recall |
 | Changes over time | No | Every verified interaction |
 | Cost per question | One embedding + one answer | A tiny network over stored vectors |
+
+## Experiment 2: can everything be learned from tokens and timestamps? (decided 2026-10-17)
+
+Experiment 1 gave Sonara 15 hand-made signals (similarity, age, replaced, times useful, neighbor vote, source). Experiment 2 tests whether Sonara can learn all of that itself from a plain record.
+
+- **Recorder (the only input):** every word of every message (your notes and questions, Qwen's answers and follow-ups) is a token. A new token gets its own place with its Qwen vector. A returning token only gets another timestamp added, plus which message it came from. The token store is built from the append-only memory log, so nothing new has to be recorded.
+- **Training:** each timestamp of a token is its own vector: the token's vector plus that date and time. No half-life, no hand-made signals, no hand-set trust in sources. Whatever time, repetition and source mean, Sonara has to learn it.
+- **Testing:** the date and time of everything trained on are known, and each test is given the current date and time, so Sonara is always asked "as of now".
+- **Learning signal:** first the same "useful memory" labels as experiment 1, so the two are compared on equal terms; one change at a time. Next, Qwen's reflection after every message ("what did we get right, what did we get wrong", plus the follow-ups), recorded into the same store.
+- **Measured against:** experiment 1's Sonara (hand-made signals), the tuned baseline and the no-experience control, on the same frozen eval questions, top-1. If tokens and timestamps alone match or beat the hand-made signals, everything can be learned from the record.
+- **Known risk:** in the world-model experiments, small networks trained on words learned word positions, not meaning. Here Qwen supplies the word vectors and Sonara never learns language, only what tokens over time point to.
 
 ## The one question for experiment 1
 
