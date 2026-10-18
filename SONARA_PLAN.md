@@ -15,6 +15,7 @@
 | Union labeling pool (baseline top 5 + Sonara top 5 + 5 newest, proposers recorded) | yes | `chat` | yes | no |
 | Experiment 2 token store (token places + timestamps) and occurrence vectors (token vector + date/time) | yes | not yet (no learner) | no | tests only |
 | Experiment 2 learner (trains only on occurrence vectors) | no | | | |
+| Experiment 3 timestamped story (`sonara_story.py`: 100 train, 20 familiar, 20 unfamiliar, 20 time) | yes | `learning_data/sonara_story` | | tests only |
 
 ## Goal
 
@@ -36,6 +37,16 @@ Experiment 1 gave Sonara 15 hand-made signals (similarity, age, replaced, times 
 - **Learning signal:** first the same "useful memory" labels as experiment 1, so the two are compared on equal terms; one change at a time. Next, Qwen's reflection after every message ("what did we get right, what did we get wrong", plus the follow-ups), recorded into the same store.
 - **Measured against:** experiment 1's Sonara (hand-made signals), the tuned baseline and the no-experience control, on the same frozen eval questions, top-1. If tokens and timestamps alone match or beat the hand-made signals, everything can be learned from the record.
 - **Known risk:** in the world-model experiments, small networks trained on words learned word positions, not meaning. Here Qwen supplies the word vectors and Sonara never learns language, only what tokens over time point to.
+
+## Experiment 3: does Sonara learn what time means from timestamped experiences? (proposed 2026-10-17)
+
+**Hypothesis (the user's):** short training shows poor results because Sonara first has to learn how relevant timestamps are. With enough timestamped experiences it learns that relevance, and from it cause and effect.
+
+- **Story (`sonara_story.py`, synthetic, a test only):** 100 timestamped training episodes about Jake, about one a day: loses something important → sad soon after (30); loses something important → fine days later (15); loses something unimportant → still happy (15); sad for an unrelated reason (25); loses something → sad → finds it → happy (15). Wording varies. **The time gap never appears in the text, only in the timestamps.**
+- **Task:** given an episode's events with timestamps, predict the mood (happy or sad) at a query date and time.
+- **Tests (never trained on), after every 10 training episodes:** *familiar* (new Jake episodes); *unfamiliar* (Maya and Sam, with phone, bike, paperclip, napkin, none seen in training); *time* (identical events, mood asked minutes vs days later; only time tells them apart).
+- **Controls:** the same learner with timestamps removed or shuffled (if real timestamps don't beat this, time wasn't learned), and always guessing the most common mood.
+- **Support for the hypothesis:** the time test rises above the no-time control as training episodes grow, and the unfamiliar test rises above chance. Order alone doesn't prove causation; the unrelated-sadness and unimportant-loss episodes are the contrasting cases.
 
 ## The one question for experiment 1
 

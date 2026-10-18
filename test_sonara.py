@@ -207,8 +207,40 @@ def test_tokens():
     print("✓ token tests passed")
 
 
+def test_story():
+    """The story's tests use only unseen episodes; the gap lives in timestamps, never in words."""
+    import re
+    import sonara_memory
+    from sonara_story import IMPORTANT, PEOPLE, TRAIN_KINDS, UNIMPORTANT, generate
+    tmp = tempfile.mkdtemp()
+    try:
+        real = sonara_memory.get_timestamps
+        episodes = generate(tmp)
+        assert sonara_memory.get_timestamps is real  # the story's clock is put back
+        memory = sonara_memory.SonaraMemorySystem(tmp)
+        split = {e["split"]: [x for x in episodes if x["split"] == e["split"]] for e in episodes}
+        assert {k: len(v) for k, v in split.items()} == {"train": 100, "familiar": 20, "unfamiliar": 20, "time": 20}
+        assert sum(TRAIN_KINDS.values()) == 100
+        train_ids = {i for e in split["train"] for i in e["memory_ids"]}
+        assert not train_ids & {i for k in ("familiar", "unfamiliar", "time") for e in split[k] for i in e["memory_ids"]}
+        times = [e["query_epoch"] for e in split["train"]]
+        assert times == sorted(times) and max(times) < min(e["query_epoch"] for e in episodes if e["split"] != "train")
+        text = " ".join(m.content.lower() for m in memory.memories.values())
+        assert not re.search(r"minute|hour|day|later|ago|soon|yesterday|morning|evening", text)  # no time words
+        train_text = " ".join(memory.memories[i].content for i in train_ids)
+        for word in [n for n, _ in PEOPLE["unfamiliar"]] + IMPORTANT["unfamiliar"] + UNIMPORTANT["unfamiliar"]:
+            assert word not in train_text  # unfamiliar people and objects never appear in training
+        for soon, later in zip(split["time"][::2], split["time"][1::2]):
+            assert soon["memory_ids"] == later["memory_ids"] and (soon["mood"], later["mood"]) == ("sad", "happy")
+            assert later["query_epoch"] - soon["query_epoch"] > 86400  # only the time differs
+    finally:
+        shutil.rmtree(tmp)
+    print("✓ story tests passed")
+
+
 if __name__ == "__main__":
     test_clock()
     test_sonara()
     test_shadow_chat()
     test_tokens()
+    test_story()
