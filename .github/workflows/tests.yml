@@ -19,10 +19,13 @@ jobs:
       - name: Install CPU PyTorch
         run: python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Compile
-        run: python -m py_compile sonara_memory.py sonara_text_encoder.py sonara_recall.py sonara.py test_sonara_memory.py test_sonara_recall.py test_sonara.py
+        run: python -m py_compile sonara_memory.py sonara_text_encoder.py sonara_recall.py sonara.py sonara_story.py sonara_story_learning.py test_sonara_story_learning.py test_sonara_memory.py test_sonara_recall.py test_sonara.py
       - name: Memory tests
         run: python test_sonara_memory.py
       - name: Recall tests
         run: python test_sonara_recall.py
       - name: Sonara tests
         run: python test_sonara.py
+
+      - name: Story incremental-learning tests
+        run: python -m unittest -q test_sonara_story_learning
