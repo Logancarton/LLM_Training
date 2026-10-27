@@ -1,5 +1,8 @@
 """End-to-end sparse cue -> learned context -> detailed reinstatement tests."""
 from pathlib import Path
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -96,6 +99,28 @@ class HippocampalInspiredRecallTests(unittest.TestCase):
             "SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertNotIn("memory_nodes", tables)
         self.assertEqual(self.memory.counts()["events"], 3)
+
+    def test_live_cli_enters_same_sparse_memory_path(self):
+        model_path = Path(self.temp.name) / "trained.json"
+        self.model.save(model_path)
+        args = [sys.executable, "sonara.py", "--db", str(self.db),
+                "--model", str(model_path)]
+
+        def invoke(*parameters):
+            return json.loads(subprocess.run(
+                args + list(parameters), check=True, capture_output=True,
+                text=True, cwd=Path(__file__).resolve().parents[1]).stdout)
+
+        invoke("store", "At dawn, Sarah moved the keys to the shelf.")
+        invoke("store", "At noon, Sarah placed the map on the drawer.")
+        invoke("store", "At dusk, Ruby moved the notebook to the drawer.")
+        trace = invoke("trace", "Sarah", "keys", "--hops", "2", "--limit", "10")
+        target = next(r for r in trace["related"] if r["identity"] == "ruby::notebook")
+        self.assertEqual(target["path"], [1, 2, 3])
+        self.assertTrue(any(c["kind"] == "actor" and c["value"] == "Sarah"
+                            for c in trace["phases"]["broader_context"]))
+        self.assertEqual(invoke("ask", "How are Sarah's keys connected to Ruby's notebook?")[
+            "activated"][0]["path"], [1, 2, 3])
 
     def test_disconnected_episode_and_unsupported_cause_abstain(self):
         self.memory.ingest("At dawn, Sarah moved the keys to the shelf.")
