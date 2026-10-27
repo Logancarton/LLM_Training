@@ -3,6 +3,7 @@ name: Sonara memory gates
 on:
   push:
     branches:
+      - main
       - sonara-hierarchical-sparse-activation-20261026
   pull_request:
 
