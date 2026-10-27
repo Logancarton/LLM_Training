@@ -40,3 +40,33 @@ Run `python train.py` for current values. The original seeded run with 500 stori
 ## Next research gate
 
 Replace the hand-coded paragraph encoder with a **supervised, trainable** paragraph-to-episode model using labeled training pairs, while retaining conservative abstention and evidence provenance. Validate held-out compositions, adversarial ambiguity, shuffled event order, state conflicts, and retrieval accuracy against a fixed indexed baseline before promoting any LLM-assisted architectural rewrite.
+
+## V1.1: fifty additional, learned association signals
+
+This update adds **50 concrete pairwise signal channels** to the original seven (57 total) in `association_signals.py`. All 50 are exercised in training and in an independent signal-coverage test. They are organized into five groups of ten: identity/pattern separation, spatial context, temporal context, action/habit relationships, and source/uncertainty/novelty. Each channel measures a particular evidence cue or contrast: for example shared actor plus changing place, repeated time, same location across different people, conflicting action, overlapping source phrases, or explicit uncertainty terms. A channel can contribute positively or negatively to a learned association. **This is not fifty distinct brain regions, neural synapses, verified factual relations, or proof of biological fidelity.** Some channels are correlated and their individual utility has not been ablated.
+
+Two supervised classifiers now learn from distinct labels:
+
+- **Identity continuity:** an actor/object-scoped episode may be connected to its own history; the strict identity boundary remains enforced even when a score is high.
+- **Contextual association:** episodes for different objects may be linked when they explicitly share an actor or place. Such links **never imply that two objects are the same, that two people were in the same place at the same time, or that one event caused another**.
+
+Both are weighted using labeled synthetic evidence. The score is an **uncalibrated association score**, not the probability that a memory is factually true. Learned top-weighted evidence cues are saved with each link and available during sparse associative recall. Each incoming episode stores **at most three identity edges and two context edges**, rather than an unbounded dense network. Retrieval remains indexed and bounded; separate factual queries cannot traverse cross-identity context links as if they were direct evidence.
+
+### Run the updated experiment
+
+After `git pull --ff-only origin main`, retrain because the parameter schema has changed:
+
+```bash
+python3 train.py --model model.json --examples 500
+python3 sonara.py --db sonara.db --model model.json store "At dawn, Sarah placed the keys on the table. At noon, Sarah moved the keys into the drawer."
+python3 sonara.py --db sonara.db --model model.json store "At dusk, Sarah placed the map on the table."
+python3 sonara.py --db sonara.db --model model.json related Sarah keys --limit 5
+python3 sonara.py --db sonara.db --model model.json ask "Where are Sarah's keys now?"
+python3 -m unittest discover -s tests -v
+```
+
+`related` returns a small number of actual stored episodes, relation types (`identity-continuity`, `shared-actor`, `shared-place`), association scores, and contributing cues. A missing association is not proof of no relationship. `model.json` is version 2 and must be retrained; existing `sonara.db` event histories are retained and the new link-evidence column is added in-place. Old stored link scores remain snapshots until re-ingestion; there is no claimed online link reoptimization.
+
+The seeded 500-example experiment reports 100% association-label accuracy on simple held-out synthetic identities and context pairs, 400/400 bounded-grammar recall questions correct, 300 stored events, and ~1,188 edges (at most 5 per inserted event). This does **not** show that all 50 channels individually improve performance or that Sonara has learned an open-domain memory representation. Encoding remains conservative and rule-based; self-generated storage code, causal reasoning, online learning feedback, long-term score calibration, and free-text retrieval remain future research.
+
+Biological analogies are deliberately narrow: hippocampal pattern separation and completion, temporal-context binding, and complementary fast episodic/slow structural learning motivate testable computational ideas, **not implementation-level equivalence**. Background: [Singh & Schapiro (2026)](https://pubmed.ncbi.nlm.nih.gov/42421581/), [McClelland et al. (1995)](https://pubmed.ncbi.nlm.nih.gov/7624455/), [Leal & Yassa (2018)](https://www.nature.com/articles/s41593-017-0065-1).

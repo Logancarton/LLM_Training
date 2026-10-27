@@ -13,13 +13,19 @@ def main():
     save.add_argument("paragraph")
     ask = sub.add_parser("ask")
     ask.add_argument("question")
+    related = sub.add_parser("related")
+    related.add_argument("actor")
+    related.add_argument("item")
+    related.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     learner = LinkLearner.load(args.model)
     with Memory(args.db, learner) as memory:
         if args.command == "store":
             print(encode_json(memory.ingest(args.paragraph)))
-        else:
+        elif args.command == "ask":
             print(json.dumps(memory.recall(args.question), indent=2))
+        else:
+            print(json.dumps(memory.associate(args.actor, args.item, args.limit), indent=2))
 
 
 if __name__ == "__main__":

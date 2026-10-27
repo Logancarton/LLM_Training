@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import sqlite3
 
+from association_signals import brain_signals
+
 
 @dataclass
 class Episode:
@@ -97,42 +99,80 @@ def features(a: Episode, b: Episode) -> dict[str, float]:
         "location_changed": float(bool(a.location and b.location) and a.location != b.location),
         "habit_pair": float(a.kind == "habit" or b.kind == "habit"),
         "both_locations": float(a.kind == "location" and b.kind == "location"),
-    }
+    } | brain_signals(a, b)
 
 
 class LinkLearner:
-    """Logistic association learner. Scores are model estimates, not calibrated truth."""
-    def __init__(self, weights: dict[str, float] | None = None, bias: float = 0.0):
-        self.weights = weights or {key: 0.0 for key in features(Episode(), Episode())}
-        self.bias = bias
+    """Two supervised logistic scorers: identity continuity vs contextual association.
 
-    def probability(self, a: Episode, b: Episode) -> float:
-        x = self.bias + sum(self.weights[k] * v for k, v in features(a, b).items())
+    Scores are uncalibrated affinity estimates, not percent-confidence in a fact.
+    Contextual edges can never override the strict factual identity boundary.
+    """
+    def __init__(self, weights: dict[str, float] | None = None, bias: float = 0.0,
+                 context_weights: dict[str, float] | None = None, context_bias: float = 0.0):
+        keys = features(Episode(), Episode())
+        self.weights = dict(weights) if weights is not None else {k: 0.0 for k in keys}
+        self.bias = bias
+        self.context_weights = (dict(context_weights) if context_weights is not None
+                                else {k: 0.0 for k in keys})
+        self.context_bias = context_bias
+
+    @staticmethod
+    def _score(a: Episode, b: Episode, weights: dict[str, float], bias: float) -> float:
+        x = bias + sum(weights[k] * v for k, v in features(a, b).items())
         return 1.0 / (1.0 + math.exp(-max(-35.0, min(35.0, x))))
 
-    def fit(self, samples: list[tuple[Episode, Episode, int]], epochs: int = 100,
-            rate: float = 0.15) -> None:
+    def probability(self, a: Episode, b: Episode) -> float:
+        return self._score(a, b, self.weights, self.bias)
+
+    def context_probability(self, a: Episode, b: Episode) -> float:
+        return self._score(a, b, self.context_weights, self.context_bias)
+
+    @staticmethod
+    def _fit(samples: list[tuple[Episode, Episode, int]], weights: dict[str, float],
+             bias: float, epochs: int, rate: float) -> float:
         if not samples or {label for _, _, label in samples} != {0, 1}:
             raise ValueError("Training needs positive and negative associations")
+        # Precompute fixed evidence cues once: train parameters, not tokenization.
+        cached = [({k: v for k, v in features(a, b).items() if v}, label)
+                  for a, b, label in samples]
         for _ in range(epochs):
-            for a, b, label in samples:
-                predicted = self.probability(a, b)
+            for vals, label in cached:
+                logit = bias + sum(weights[k] * v for k, v in vals.items())
+                predicted = 1.0 / (1.0 + math.exp(-max(-35.0, min(35.0, logit))))
                 error = label - predicted
-                vals = features(a, b)
                 for k, value in vals.items():
-                    self.weights[k] += rate * (error * value - 0.001 * self.weights[k])
-                self.bias += rate * error
+                    weights[k] += rate * error * value
+                bias += rate * error
+            for k in weights:
+                weights[k] *= 1.0 - rate * 0.001
+        return bias
+
+    def fit(self, samples: list[tuple[Episode, Episode, int]], epochs: int = 100,
+            rate: float = 0.08) -> None:
+        self.bias = self._fit(samples, self.weights, self.bias, epochs, rate)
+
+    def fit_context(self, samples: list[tuple[Episode, Episode, int]], epochs: int = 100,
+                    rate: float = 0.08) -> None:
+        self.context_bias = self._fit(samples, self.context_weights,
+                                      self.context_bias, epochs, rate)
 
     def save(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps({"weights": self.weights, "bias": self.bias}, indent=2))
+        Path(path).write_text(json.dumps({"version": 2, "weights": self.weights,
+                "bias": self.bias, "context_weights": self.context_weights,
+                "context_bias": self.context_bias}, indent=2))
 
     @classmethod
     def load(cls, path: str | Path) -> LinkLearner:
         raw = json.loads(Path(path).read_text())
         expected = set(features(Episode(), Episode()))
-        if set(raw["weights"]) != expected:
-            raise ValueError("Incompatible association model")
-        return cls({k: float(v) for k, v in raw["weights"].items()}, float(raw["bias"]))
+        if (raw.get("version") != 2 or set(raw["weights"]) != expected or
+                set(raw["context_weights"]) != expected):
+            raise ValueError("Model version changed: run python train.py --model model.json")
+        return cls({k: float(v) for k, v in raw["weights"].items()},
+                   float(raw["bias"]),
+                   {k: float(v) for k, v in raw["context_weights"].items()},
+                   float(raw["context_bias"]))
 
 
 class Memory:
@@ -151,12 +191,19 @@ class Memory:
               source TEXT NOT NULL, novelty INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS event_lookup ON events(identity,kind,id);
+            CREATE INDEX IF NOT EXISTS event_actor ON events(actor,id);
+            CREATE INDEX IF NOT EXISTS event_place ON events(location,id);
             CREATE TABLE IF NOT EXISTS links (
               source INTEGER NOT NULL, target INTEGER NOT NULL, strength REAL NOT NULL,
-              relation TEXT NOT NULL, PRIMARY KEY(source,target)
+              relation TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '[]',
+              PRIMARY KEY(source,target)
             );
             CREATE INDEX IF NOT EXISTS link_target ON links(target,strength);
         """)
+        # Forward migration for existing persistent memory files.
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(links)")}
+        if "evidence" not in columns:
+            self.conn.execute("ALTER TABLE links ADD COLUMN evidence TEXT NOT NULL DEFAULT '[]'")
 
     def close(self) -> None:
         self.conn.close()
@@ -178,28 +225,85 @@ class Memory:
         entries = self.encoder.encode(paragraph)
         with self.conn:
             for entry in entries:
-                earlier = [self._episode(row) for row in self.conn.execute(
-                    "SELECT * FROM events WHERE identity=? AND identity != '' ORDER BY id DESC LIMIT 12",
-                    (entry.identity,))]
                 cursor = self.conn.execute("""INSERT INTO events
                     (identity,actor,item,action,location,stated_time,kind,source,novelty)
                     VALUES (?,?,?,?,?,?,?,?,0)""",
                     (entry.identity, entry.actor, entry.item, entry.action, entry.location,
                      entry.stated_time, entry.kind, entry.source))
                 entry.id = cursor.lastrowid
-                # Hard identity boundary: learned scores cannot link unrelated identities.
-                for old in earlier:
-                    p = self.learner.probability(entry, old)
-                    if p >= self.threshold:
-                        self.conn.execute("""INSERT OR REPLACE INTO links
-                          (source,target,strength,relation) VALUES (?,?,?,?)""",
-                          (entry.id, old.id, p, "temporal-association"))
                 if entry.identity:
                     self._update_novelty(entry.identity)
+            # Re-read after novelty updates so edges incorporate the current evidence.
             for entry in entries:
-                row = self.conn.execute("SELECT novelty FROM events WHERE id=?", (entry.id,)).fetchone()
-                entry.novelty = bool(row["novelty"])
+                entry.novelty = bool(self.conn.execute(
+                    "SELECT novelty FROM events WHERE id=?", (entry.id,)).fetchone()[0])
+                if not entry.identity:
+                    continue  # unmatched notes stay evidence-only, not speculative links
+                same_identity = self.conn.execute("""SELECT * FROM events
+                    WHERE identity=? AND id<? ORDER BY id DESC LIMIT 12""",
+                    (entry.identity, entry.id)).fetchall()
+                identity_edges = []
+                for row in same_identity:
+                    old = self._episode(row)
+                    score = self.learner.probability(entry, old)
+                    if score >= self.threshold:
+                        identity_edges.append((score, old, "identity-continuity"))
+                # Enforce sparse storage too: at most 3 identity edges per episode.
+                for score, old, relation in sorted(identity_edges, key=lambda x: -x[0])[:3]:
+                    self._link(entry, old, score, relation)
+                # Context links are *not* factual identity links; require shared
+                # explicit actor/place. Only the 12 most recent per index, bounded.
+                candidates = {}
+                for column, value in (("actor", entry.actor), ("location", entry.location)):
+                    if not value:
+                        continue
+                    for row in self.conn.execute(f"""SELECT * FROM events WHERE {column}=?
+                        AND id<? AND identity!=? ORDER BY id DESC LIMIT 12""",
+                        (value, entry.id, entry.identity)):
+                        candidates[row["id"]] = row
+                context_edges = []
+                for row in candidates.values():
+                    old = self._episode(row)
+                    score = self.learner.context_probability(entry, old)
+                    if score >= self.threshold:
+                        relation = ("shared-actor" if entry.actor == old.actor else
+                                    "shared-place")
+                        context_edges.append((score, old, relation))
+                for score, old, relation in sorted(context_edges, key=lambda x: -x[0])[:2]:
+                    self._link(entry, old, score, relation)
         return entries
+
+    def _link(self, new: Episode, old: Episode, score: float, relation: str) -> None:
+        # Explainable evidence cues, not fake confidences about particular facts.
+        weights = (self.learner.weights if relation == "identity-continuity"
+                   else self.learner.context_weights)
+        cues = sorted(((key, round(val, 4), round(weights[key] * val, 4))
+                       for key, val in features(new, old).items() if val > 0),
+                      key=lambda cue: (-abs(cue[2]), cue[0]))[:8]
+        self.conn.execute("""INSERT OR REPLACE INTO links
+            (source,target,strength,relation,evidence) VALUES (?,?,?,?,?)""",
+            (new.id, old.id, score, relation, json.dumps(cues)))
+
+    def associate(self, actor: str, item: str, limit: int = 5) -> dict:
+        """Sparse, evidence-labeled associative recall. Never asserts causal truth."""
+        if limit < 1 or limit > 20:
+            raise ValueError("limit must be between 1 and 20")
+        identity = f"{actor.casefold()}::{item.casefold()}"
+        seed = self.conn.execute("""SELECT * FROM events WHERE identity=?
+            ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
+        if seed is None:
+            return {"seed": None, "related": [], "examined": 0}
+        # Both inbound and outbound edges, so old events can reactivate new events.
+        rows = self.conn.execute("""SELECT e.id, e.source, e.identity,
+             l.strength, l.relation, l.evidence FROM links l
+             JOIN events e ON e.id = CASE WHEN l.source=? THEN l.target ELSE l.source END
+             WHERE l.source=? OR l.target=? ORDER BY l.strength DESC LIMIT ?""",
+             (seed["id"], seed["id"], seed["id"], limit)).fetchall()
+        return {"seed": {"id": seed["id"], "source": seed["source"]},
+                "related": [{"id": x["id"], "source": x["source"],
+                             "relation": x["relation"], "association_score": round(x["strength"], 4),
+                             "evidence_cues": json.loads(x["evidence"])} for x in rows],
+                "examined": len(rows)}
 
     def _update_novelty(self, identity: str) -> None:
         habit = self.conn.execute("""SELECT location FROM events

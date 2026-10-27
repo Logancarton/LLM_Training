@@ -58,11 +58,99 @@ def build_examples(seed: int = 17, n: int = 500, test: bool = False):
     return samples, paragraphs
 
 
-def association_metrics(learner: LinkLearner, samples: list[tuple[Episode, Episode, int]]) -> dict:
+def build_context_examples(seed: int = 29, n: int = 500, test: bool = False):
+    """Teach contextual overlap separately from same-object identity.
+
+    A shared object *label* across people is NOT evidence of one physical item.
+    """
+    rng = random.Random(seed)
+    people = TEST_PEOPLE if test else TRAIN_PEOPLE
+    objects = TEST_ITEMS if test else TRAIN_ITEMS
+    places = TEST_PLACES if test else TRAIN_PLACES
+    samples = []
+    for _ in range(n):
+        actor, other = rng.sample(people, 2)
+        item, other_item = rng.sample(objects, 2)
+        place, other_place = rng.sample(places, 2)
+        a = Episode(actor=actor, item=item, action="moved", location=place,
+                    stated_time="Monday morning", kind="location",
+                    source=f"{actor} moved the {item} into the {place}.")
+        samples.extend([
+            (a, Episode(actor=actor, item=other_item, action="placed",
+                        location=other_place, stated_time="Tuesday evening",
+                        kind="location", source=f"{actor} placed the {other_item} at the {other_place}."), 1),
+            (a, Episode(actor=other, item=other_item, action="placed", location=place,
+                        stated_time="Tuesday evening", kind="location",
+                        source=f"{other} placed the {other_item} on the {place}."), 1),
+            (a, Episode(actor=other, item=item, action="moved", location=other_place,
+                        stated_time="Tuesday evening", kind="location",
+                        source=f"{other} moved the {item} to the {other_place}."), 0),
+            (a, Episode(actor=other, item=other_item, action="placed", location=other_place,
+                        stated_time="Tuesday evening", kind="location",
+                        source=f"{other} placed the {other_item} into the {other_place}."), 0),
+        ])
+    rng.shuffle(samples)
+    return samples
+
+def build_signal_curriculum(seed: int = 103, n: int = 480, test: bool = False):
+    """Varied pair supervision for the full cue vocabulary, beyond the grammar.
+
+    Labels come from explicit synthetic actor/item/place relations, never from
+    the model's own output. This teaches cues, NOT open-domain paragraph parsing.
+    """
+    rng = random.Random(seed)
+    people = TEST_PEOPLE if test else TRAIN_PEOPLE
+    objects = TEST_ITEMS if test else TRAIN_ITEMS
+    places = ("garden shelf", "office shelf", "garden drawer", "kitchen table",
+              "office cabinet", "front door") if not test else (
+              "studio shelf", "attic shelf", "studio drawer", "porch table",
+              "attic cabinet", "garden door")
+    times = ("Monday morning at 8 AM", "Monday morning at 9 AM",
+             "Tuesday evening at 9 PM", "Wednesday afternoon at 11 AM", "", "At noon")
+    actions = ("moved", "placed", "usually", "carried", "stored")
+    identity, context = [], []
+    for i in range(n):
+        actor, other_actor = rng.sample(people, 2)
+        item, other_item = rng.sample(objects, 2)
+        place, other_place = rng.sample(places, 2)
+        kind_a = rng.choice(("location", "location", "habit"))
+        act_a = rng.choice(actions)
+        time_a = rng.choice(times)
+        source_a = rng.choice(("Maybe", "No", "Reportedly", "")) + f" {actor} {act_a} {item} at {place}."
+        a = Episode(actor=actor, item=item, location=place, action=act_a,
+                    stated_time=time_a, kind=kind_a, novelty=bool(rng.randrange(3) == 0),
+                    source=source_a.strip())
+        pattern = i % 6
+        # Identity / actor context / place context / same-label distractor / unconnected / changed identity.
+        actor_b = actor if pattern in (0, 1, 5) else other_actor
+        item_b = item if pattern in (0, 2, 3) else other_item
+        place_b = place if pattern in (0, 2, 5) else other_place
+        action_b = act_a if rng.randrange(3) == 0 else rng.choice(actions)
+        time_b = time_a if rng.randrange(3) == 0 else rng.choice(times)
+        source_b = rng.choice(("Maybe", "No", "Perhaps", "")) + f" {actor_b} {action_b} {item_b} at {place_b}."
+        b = Episode(actor=actor_b, item=item_b, location=place_b, action=action_b,
+                    stated_time=time_b, kind=rng.choice(("habit", "location")),
+                    novelty=bool(rng.randrange(3) == 0), source=source_b.strip())
+        identity.append((a, b, int(a.identity == b.identity)))
+        if a.identity != b.identity:
+            context.append((a, b, int(actor_b == actor or place_b == place)))
+    # Explicit rare cues: temporal habit conflict and partially known location.
+    exemplar = Episode(actor=people[0], item=objects[0], action="usually",
+                       location=places[0], kind="habit", source="Usually stored at the first place.")
+    changed = Episode(actor=people[0], item=objects[0], action="moved",
+                      location=places[1], kind="location", source="Moved to a different place.")
+    missing = Episode(actor=people[0], item=objects[0], action="moved",
+                      location="", kind="note", source="Location was not specified.")
+    identity.extend(((exemplar, changed, 1), (exemplar, missing, 1)))
+    rng.shuffle(identity)
+    rng.shuffle(context)
+    return identity, context
+
+def association_metrics(learner: LinkLearner, samples: list[tuple[Episode, Episode, int]], context: bool = False) -> dict:
     tp = fp = tn = fn = 0
     positive_scores, negative_scores = [], []
     for a, b, label in samples:
-        score = learner.probability(a, b)
+        score = (learner.context_probability(a, b) if context else learner.probability(a, b))
         if label:
             positive_scores.append(score)
         else:
@@ -111,18 +199,32 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
     train, _ = build_examples(seed=args.seed, n=args.examples)
+    diverse_identity, diverse_context = build_signal_curriculum(
+        seed=args.seed + 59, n=args.examples)
     heldout, stories = build_examples(seed=args.seed + 23, n=100, test=True)
+    context_train = build_context_examples(seed=args.seed, n=args.examples)
+    context_heldout = build_context_examples(seed=args.seed + 23, n=100, test=True)
     before = LinkLearner()
     learner = LinkLearner()
-    learner.fit(train)
+    learner.fit(train + diverse_identity)
+    learner.fit_context(context_train + diverse_context)
     learner.save(args.model)
     report = {
-        "training_pairs": len(train), "unseen_pairs": len(heldout),
+        "training_pairs": len(train) + len(diverse_identity), "unseen_pairs": len(heldout),
+        "context_training_pairs": len(context_train) + len(diverse_context),
+        "context_unseen_pairs": len(context_heldout),
+        "extra_association_signals": 50,
+        "signals_observed_during_training": len({k for a, b, _ in diverse_identity
+            for k, value in __import__('association_signals').brain_signals(a, b).items()
+            if value > 0}),
         "before": association_metrics(before, heldout),
         "after": association_metrics(learner, heldout),
+        "context_before": association_metrics(before, context_heldout, context=True),
+        "context_after": association_metrics(learner, context_heldout, context=True),
         "memory_benchmark": benchmark(learner, stories),
         "limitations": ["Synthetic grammar only: paragraph extraction is not yet learned",
                         "Association scores are not validated calibrated probabilities",
+                        "50 pairwise cues are inspired by memory computation, not 50 neural pathways",
                         "No autonomous code generation or LLM consultation yet"]}
     print(json.dumps(report, indent=2))
 
