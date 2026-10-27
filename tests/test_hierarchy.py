@@ -50,7 +50,11 @@ class HippocampalInspiredRecallTests(unittest.TestCase):
                          "At dusk, Ruby moved the notebook to the drawer.")
         self.assertEqual(len(recovered["supporting_links"]), 2)
         self.assertTrue(traced["phases"]["detail_cue"])
-        self.assertTrue(traced["phases"]["broader_context"])
+        contexts = traced["phases"]["broader_context"]
+        self.assertTrue(any(x["kind"] == "actor" and x["value"] == "Sarah"
+                            for x in contexts))
+        self.assertTrue(any(x["kind"] == "location" and x["value"] == "drawer"
+                            for x in contexts))
         self.assertTrue(traced["phases"]["detail_reinstatement"])
 
         question = "How are Sarah's keys connected to Ruby's notebook?"
