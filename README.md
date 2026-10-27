@@ -70,3 +70,52 @@ python3 -m unittest discover -s tests -v
 The seeded 500-example experiment reports 100% association-label accuracy on simple held-out synthetic identities and context pairs, 400/400 bounded-grammar recall questions correct, 300 stored events, and ~1,188 edges (at most 5 per inserted event). This does **not** show that all 50 channels individually improve performance or that Sonara has learned an open-domain memory representation. Encoding remains conservative and rule-based; self-generated storage code, causal reasoning, online learning feedback, long-term score calibration, and free-text retrieval remain future research.
 
 Biological analogies are deliberately narrow: hippocampal pattern separation and completion, temporal-context binding, and complementary fast episodic/slow structural learning motivate testable computational ideas, **not implementation-level equivalence**. Background: [Singh & Schapiro (2026)](https://pubmed.ncbi.nlm.nih.gov/42421581/), [McClelland et al. (1995)](https://pubmed.ncbi.nlm.nih.gov/7624455/), [Leal & Yassa (2018)](https://www.nature.com/articles/s41593-017-0065-1).
+
+## V1.2: cue → context → episode (hippocampal-inspired)
+
+A partial **detailed episode** is used as a retrieval cue. Instead of
+consulting synthetic hierarchy tiers or comparing episode counts, the memory
+owner follows **previously learned, persistent edges**. The first hop
+reactivates a broader set of linked contexts (shared actor, shared recorded
+location or same scoped identity). A second bounded hop may lead to another
+episode that has no direct edge to the original cue. The last stage
+**reinstates the original stored episode evidence**. The full link path and
+relation type are returned so the mechanism can be audited.
+
+This design is inspired by hippocampal indexing and pattern completion, but it
+is **not** a mechanistic hippocampal neural simulation. It does not claim
+CA3 attractor dynamics, dentate sparse coding, independently learned abstract
+concepts, probabilistic calibration, or causal discovery.
+
+The three phases are **query-time signal transitions within one memory store**,
+not three memory databases or artificial facts. Memory still persists as
+`events` and `links`. Retrieval uses a budgeted two-hop competitive
+frontier (default beam 8; at most 20 results); association strengths are
+uncalibrated model outputs. A two-hop connection never proves that the
+outermost episodes describe the same object, happened together, or caused
+each other.
+
+### Reproduce and inspect
+
+```bash
+python3 sonara.py --db sonara.db --model model.json store "At dawn, Sarah moved the keys to the shelf."
+python3 sonara.py --db sonara.db --model model.json store "At noon, Sarah placed the map on the drawer."
+python3 sonara.py --db sonara.db --model model.json store "At dusk, Ruby moved the notebook to the drawer."
+python3 sonara.py --db sonara.db --model model.json trace Sarah keys --hops 2 --limit 10
+python3 sonara.py --db sonara.db --model model.json ask "How are Sarah's keys connected to Ruby's notebook?"
+python3 -m unittest discover -s tests -v
+```
+
+There is deliberately **no shortcut** for associative questions: deleting the
+learned connecting edge must remove the associative answer while leaving direct
+factual locations unchanged. Tests under `tests/test_hierarchy.py` exercise
+this ablation, two-hop retrieval, restart persistence, evidence provenance,
+strict identity boundaries and sparse expansion.
+
+**Remaining limitations:** cue resolution is still restricted to the rule-based
+actor/object parser; graph expansion is supervised association, not learned
+adaptive attention; no open-domain sentence embeddings, cortical conceptual
+hierarchy, associative weight updates from retrieval success, or mechanism
+for discovering explanations of novelty exists yet. The 400/400 original
+factual benchmark remains **index-based** and should not be presented as
+validation of associative pattern completion.

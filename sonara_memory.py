@@ -284,26 +284,99 @@ class Memory:
             (source,target,strength,relation,evidence) VALUES (?,?,?,?,?)""",
             (new.id, old.id, score, relation, json.dumps(cues)))
 
-    def associate(self, actor: str, item: str, limit: int = 5) -> dict:
-        """Sparse, evidence-labeled associative recall. Never asserts causal truth."""
-        if limit < 1 or limit > 20:
-            raise ValueError("limit must be between 1 and 20")
+    def reactivate(self, actor: str, item: str, limit: int = 5,
+                   hops: int = 2, beam: int = 8) -> dict:
+        """Specific episode cue -> associated context -> reinstated source episodes.
+
+        This is a bounded learned graph, not a simulated hippocampus. No graph
+        path certifies a fact or creates an identity, causal or temporal relation.
+        """
+        if not 1 <= limit <= 20 or not 1 <= hops <= 3 or not 1 <= beam <= 20:
+            raise ValueError("limit, hops and beam must be within bounds")
         identity = f"{actor.casefold()}::{item.casefold()}"
-        seed = self.conn.execute("""SELECT * FROM events WHERE identity=?
+        row = self.conn.execute("""SELECT * FROM events WHERE identity=?
             ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
-        if seed is None:
-            return {"seed": None, "related": [], "examined": 0}
-        # Both inbound and outbound edges, so old events can reactivate new events.
-        rows = self.conn.execute("""SELECT e.id, e.source, e.identity,
-             l.strength, l.relation, l.evidence FROM links l
-             JOIN events e ON e.id = CASE WHEN l.source=? THEN l.target ELSE l.source END
-             WHERE l.source=? OR l.target=? ORDER BY l.strength DESC LIMIT ?""",
-             (seed["id"], seed["id"], seed["id"], limit)).fetchall()
-        return {"seed": {"id": seed["id"], "source": seed["source"]},
-                "related": [{"id": x["id"], "source": x["source"],
-                             "relation": x["relation"], "association_score": round(x["strength"], 4),
-                             "evidence_cues": json.loads(x["evidence"])} for x in rows],
-                "examined": len(rows)}
+        empty = {"detail_cue": [], "broader_context": [],
+                 "detail_reinstatement": []}
+        if row is None:
+            return {"seed": None, "related": [], "examined": 0, "phases": empty}
+        seed = self._episode(row)
+        cue = {"id": seed.id, "identity": identity, "source": seed.source}
+        # The only routes are the existing supervised association edges.
+        frontier = [(seed.id, 1.0, (seed.id,), ())]
+        winners, contexts = {}, []
+        examined = 0
+        for depth in range(1, hops + 1):
+            next_frontier = {}
+            for current_id, activation, path, path_links in frontier:
+                rows = self.conn.execute("""SELECT l.source, l.target, l.strength,
+                    l.relation, l.evidence, e.id AS neighbor_id,
+                    e.actor AS neighbor_actor, e.location AS neighbor_location,
+                    e.identity AS neighbor_identity
+                    FROM links l JOIN events e ON e.id =
+                      CASE WHEN l.source=? THEN l.target ELSE l.source END
+                    WHERE l.source=? OR l.target=?
+                    ORDER BY l.strength DESC, e.id DESC LIMIT ?""",
+                    (current_id, current_id, current_id, beam)).fetchall()
+                examined += len(rows)
+                for edge in rows:
+                    neighbor_id = edge["neighbor_id"]
+                    if neighbor_id in path:
+                        continue
+                    score = activation * edge["strength"] * (0.9 if depth > 1 else 1)
+                    if score < 0.1:
+                        continue
+                    link = {"from_id": current_id, "to_id": neighbor_id,
+                            "relation": edge["relation"],
+                            "edge_strength": round(edge["strength"], 4),
+                            "evidence_cues": json.loads(edge["evidence"])}
+                    candidate = (neighbor_id, score, path + (neighbor_id,),
+                                 path_links + (link,))
+                    if (neighbor_id not in next_frontier or
+                            score > next_frontier[neighbor_id][1]):
+                        next_frontier[neighbor_id] = candidate
+                    if neighbor_id not in winners or score > winners[neighbor_id][1]:
+                        winners[neighbor_id] = candidate
+                    relation = edge["relation"]
+                    if relation == "shared-actor":
+                        context_kind, context_value = "actor", edge["neighbor_actor"]
+                    elif relation == "shared-place":
+                        context_kind, context_value = "location", edge["neighbor_location"]
+                    else:
+                        context_kind, context_value = "scoped-identity", edge["neighbor_identity"]
+                    contexts.append({"from_id": current_id, "to_id": neighbor_id,
+                                     "relation": relation, "kind": context_kind,
+                                     "value": context_value, "hop": depth,
+                                     "activation": round(score, 4)})
+            frontier = sorted(next_frontier.values(),
+                              key=lambda c: (-c[1], -c[0]))[:beam]
+            if not frontier:
+                break
+        selected = sorted(winners.values(), key=lambda c: (-c[1], -c[0]))[:limit]
+        episodes = {}
+        if selected:
+            marks = ",".join("?" for _ in selected)
+            for event in self.conn.execute(f"SELECT * FROM events WHERE id IN ({marks})",
+                                           [entry[0] for entry in selected]):
+                episodes[event["id"]] = self._episode(event)
+        related = []
+        for event_id, score, path, path_links in selected:
+            event = episodes[event_id]
+            related.append({"id": event.id, "identity": event.identity,
+                            "source": event.source, "relation": path_links[-1]["relation"],
+                            "association_score": round(score, 4), "hops": len(path_links),
+                            "path": list(path), "supporting_links": list(path_links),
+                            "evidence_cues": path_links[-1]["evidence_cues"]})
+        return {"seed": cue, "related": related, "examined": examined,
+                "phases": {"detail_cue": [cue], "broader_context": contexts,
+                           "detail_reinstatement": [
+                               {"id": r["id"], "identity": r["identity"],
+                                "source": r["source"], "via_path": r["path"]}
+                               for r in related]}}
+
+    def associate(self, actor: str, item: str, limit: int = 5) -> dict:
+        """Legacy API name; delegates to the single associative retrieval owner."""
+        return self.reactivate(actor, item, limit=limit)
 
     def _update_novelty(self, identity: str) -> None:
         habit = self.conn.execute("""SELECT location FROM events
@@ -314,6 +387,36 @@ class Memory:
 
     def recall(self, query: str, limit: int = 3) -> dict:
         """Answers a bounded query grammar, safely abstaining otherwise."""
+        requested = re.fullmatch(
+            r"What is (?:connected|associated|related) to "
+            r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)\?",
+            query.strip(), re.I)
+        if requested:
+            identity = f"{requested['actor'].lower()}::{requested['item'].lower()}"
+            state = self.reactivate(requested["actor"], requested["item"], limit=20)
+            related = next((r for r in state["related"] if r["identity"] != identity), None)
+            return {"answer": related["source"] if related else None,
+                    "reason": None if related else "No stored associative path",
+                    "activated": [related] if related else [],
+                    "examined": state["examined"], "phases": state["phases"]}
+
+        connected = re.fullmatch(
+            r"How are (?P<a>[A-Z][a-z]+)'s (?P<ia>[a-z][a-z -]*?) "
+            r"connected to (?P<b>[A-Z][a-z]+)'s (?P<ib>[a-z][a-z -]*?)\?",
+            query.strip(), re.I)
+        if connected:
+            subject = f"{connected['a'].lower()}::{connected['ia'].lower()}"
+            target = f"{connected['b'].lower()}::{connected['ib'].lower()}"
+            state = self.reactivate(connected["a"], connected["ia"],
+                                    limit=20, hops=2, beam=12)
+            related = next((r for r in state["related"]
+                            if r["identity"] == target and target != subject), None)
+            return {"answer": "Connected via recorded associations only, not "
+                    "evidence of causation, co-presence, or shared identity."
+                    if related else None,
+                    "reason": None if related else "No stored associative path",
+                    "activated": [related] if related else [],
+                    "examined": state["examined"], "phases": state["phases"]}
         match = re.fullmatch(
             r"(?P<prompt>Where (?:are|were|is|was)|What is unusual about|Why did) "
             r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)"
