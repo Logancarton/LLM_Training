@@ -310,7 +310,9 @@ class Memory:
             next_frontier = {}
             for current_id, activation, path, path_links in frontier:
                 rows = self.conn.execute("""SELECT l.source, l.target, l.strength,
-                    l.relation, l.evidence, e.id AS neighbor_id
+                    l.relation, l.evidence, e.id AS neighbor_id,
+                    e.actor AS neighbor_actor, e.location AS neighbor_location,
+                    e.identity AS neighbor_identity
                     FROM links l JOIN events e ON e.id =
                       CASE WHEN l.source=? THEN l.target ELSE l.source END
                     WHERE l.source=? OR l.target=?
@@ -335,9 +337,17 @@ class Memory:
                         next_frontier[neighbor_id] = candidate
                     if neighbor_id not in winners or score > winners[neighbor_id][1]:
                         winners[neighbor_id] = candidate
+                    relation = edge["relation"]
+                    if relation == "shared-actor":
+                        context_kind, context_value = "actor", edge["neighbor_actor"]
+                    elif relation == "shared-place":
+                        context_kind, context_value = "location", edge["neighbor_location"]
+                    else:
+                        context_kind, context_value = "scoped-identity", edge["neighbor_identity"]
                     contexts.append({"from_id": current_id, "to_id": neighbor_id,
-                                     "relation": edge["relation"],
-                                     "hop": depth})
+                                     "relation": relation, "kind": context_kind,
+                                     "value": context_value, "hop": depth,
+                                     "activation": round(score, 4)})
             frontier = sorted(next_frontier.values(),
                               key=lambda c: (-c[1], -c[0]))[:beam]
             if not frontier:
