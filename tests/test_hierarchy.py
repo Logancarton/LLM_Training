@@ -1,4 +1,4 @@
-"""End-to-end proof of memory hierarchy and genuinely link-dependent recall."""
+"""End-to-end sparse cue -> learned context -> detailed reinstatement tests."""
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,85 +7,99 @@ from sonara_memory import LinkLearner, Memory
 from train import build_context_examples, build_examples
 
 
-class HierarchicalRecallTests(unittest.TestCase):
+class HippocampalInspiredRecallTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        identity, _ = build_examples(n=50)
-        cls.learner = LinkLearner()
-        cls.learner.fit(identity, epochs=50)
-        cls.learner.fit_context(build_context_examples(n=100), epochs=60)
+        identity_samples, _ = build_examples(n=50)
+        cls.model = LinkLearner()
+        cls.model.fit(identity_samples, epochs=60)
+        cls.model.fit_context(build_context_examples(n=120), epochs=75)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.db = Path(self.temp.name) / "memory.db"
-        self.memory = Memory(self.db, self.learner)
+        self.db = Path(self.temp.name) / "events.db"
+        self.memory = Memory(self.db, self.model)
 
     def tearDown(self):
         self.memory.close()
         self.temp.cleanup()
 
-    def test_associative_answer_requires_learned_edges_ablation(self):
+    def _connected_story(self):
         self.memory.ingest("At dawn, Sarah moved the keys to the shelf.")
-        self.memory.ingest("At noon, Sarah placed the map on the shelf.")
-        query = "What is associated with Sarah's keys?"
-        result = self.memory.recall(query)
-        self.assertIn("Sarah's map", result["answer"])
-        self.assertEqual(result["association_relation"], "shared-actor")
-        self.assertTrue(any(level["level"] == 2 for level in result["activated_levels"]))
-        self.assertTrue(any(level["level"] == 1 for level in result["activated_levels"]))
-        self.assertTrue(any(level["level"] == 0 for level in result["activated_levels"]))
-        self.assertLessEqual(len(result["activated"]), 3)
-        # Ablation: unchanged evidence, identity, parser, and database lookup.
+        self.memory.ingest("At noon, Sarah placed the map on the drawer.")
+        self.memory.ingest("At dusk, Ruby moved the notebook to the drawer.")
+
+    def test_two_hop_existing_links_reinstate_detailed_evidence(self):
+        self._connected_story()
+        rows = self.memory.conn.execute(
+            "SELECT source,target,relation FROM links ORDER BY source,target").fetchall()
+        edges = [(r["source"], r["target"], r["relation"]) for r in rows]
+        self.assertTrue(any(a == 2 and b == 1 and rel == "shared-actor"
+                            for a, b, rel in edges), edges)
+        self.assertTrue(any(a == 3 and b == 2 and rel == "shared-place"
+                            for a, b, rel in edges), edges)
+        self.assertFalse(any({a, b} == {1, 3} for a, b, _ in edges), edges)
+
+        traced = self.memory.reactivate("Sarah", "keys", limit=10, hops=2)
+        self.assertEqual(traced["seed"]["id"], 1)
+        recovered = next((x for x in traced["related"] if x["id"] == 3), None)
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["path"], [1, 2, 3])
+        self.assertEqual(recovered["hops"], 2)
+        self.assertEqual(recovered["source"],
+                         "At dusk, Ruby moved the notebook to the drawer.")
+        self.assertEqual(len(recovered["supporting_links"]), 2)
+        self.assertTrue(traced["phases"]["detail_cue"])
+        self.assertTrue(traced["phases"]["broader_context"])
+        self.assertTrue(traced["phases"]["detail_reinstatement"])
+
+        question = "How are Sarah's keys connected to Ruby's notebook?"
+        self.assertIsNotNone(self.memory.recall(question)["answer"])
+        self.assertEqual(self.memory.recall(question)["activated"][0]["path"],
+                         [1, 2, 3])
+
+    def test_edge_ablation_removes_associative_answer_but_preserves_facts(self):
+        self._connected_story()
+        question = "How are Sarah's keys connected to Ruby's notebook?"
+        self.assertIsNotNone(self.memory.recall(question)["answer"])
         with self.memory.conn:
-            self.memory.conn.execute("DELETE FROM links")
-        ablated = self.memory.recall(query)
-        self.assertIsNone(ablated["answer"])
-        self.assertEqual(ablated["reason"], "No learned contextual link")
-        # Factual location queries are intentionally link-independent.
-        self.assertEqual(self.memory.recall("Where are Sarah's keys now?")["answer"], "shelf")
+            self.memory.conn.execute("DELETE FROM links WHERE source=3 AND target=2")
+        after = self.memory.recall(question)
+        self.assertIsNone(after["answer"])
+        self.assertEqual(after["reason"], "No stored associative path")
+        self.assertEqual(self.memory.recall("Where are Sarah's keys now?")["answer"],
+                         "shelf")
 
-    def test_levels_have_evidence_counts_and_restart_survival(self):
-        self.memory.ingest("At dawn, Sarah moved the keys to the shelf.")
-        self.memory.ingest("At noon, Sarah placed the keys on the shelf.")
-        self.memory.ingest("At dusk, Sarah moved the keys to the drawer.")
-        hierarchy = self.memory.hierarchy("Sarah", "keys")
-        self.assertEqual(hierarchy["levels"][0]["level"], 2)
-        self.assertEqual(hierarchy["levels"][0]["evidence_count"], 3)
-        shelf = next(x for x in hierarchy["levels"] if x["label"] == "shelf")
-        self.assertEqual(shelf["level"], 1)
-        self.assertEqual(shelf["evidence_count"], 2)
+    def test_sparse_budgets_and_no_cross_identity_factual_merging(self):
+        self._connected_story()
+        for _ in range(80):
+            self.memory.ingest("At noon, Noah moved the compass to the hallway.")
+        recall = self.memory.reactivate("Sarah", "keys", hops=2, beam=4, limit=3)
+        self.assertLessEqual(recall["examined"], 4 + 4 * 4)
+        self.assertLessEqual(len(recall["related"]), 3)
+        self.assertEqual(self.memory.recall("Where are Ruby's notebook now?")["answer"],
+                         "drawer")
+        self.assertEqual(self.memory.recall("Where are Sarah's keys now?")["answer"],
+                         "shelf")
+
+    def test_persistent_index_and_no_synthetic_hierarchy_memories(self):
+        self._connected_story()
+        before = self.memory.reactivate("Sarah", "keys", limit=10)
         self.memory.close()
-        self.memory = Memory(self.db, self.learner)
-        self.assertEqual(self.memory.hierarchy("Sarah", "keys"), hierarchy)
-        self.assertEqual(self.memory.recall("Where are Sarah's keys now?")["answer"], "drawer")
+        self.memory = Memory(self.db, self.model)
+        self.assertEqual(self.memory.reactivate("Sarah", "keys", limit=10), before)
+        tables = {r[0] for r in self.memory.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertNotIn("memory_nodes", tables)
+        self.assertEqual(self.memory.counts()["events"], 3)
 
-    def test_pattern_guided_seed_selection_not_just_last_three_events(self):
-        for _ in range(4):
-            self.memory.ingest("At dawn, Sarah moved the keys to the shelf.")
-        self.memory.ingest("At noon, Sarah moved the keys to the drawer.")
-        self.memory.ingest("At dusk, Sarah moved the keys to the counter.")
-        related = self.memory.associate("Sarah", "keys", limit=3)
-        # Event 4 is no longer among the 3 most recent events, but the
-        # repeated shelf motif elects it as one of the bounded seeds.
-        seeded = [n["id"] for n in related["activated_levels"]
-                  if n["kind"] == "episode"]
-        self.assertIn(4, seeded)
-        self.assertIn(6, seeded)
-        self.assertLessEqual(len(seeded), 3)
-        self.assertLessEqual(len(related["related"]), 3)
-
-    def test_abstains_on_unlinked_context_and_migrates_old_hierarchy(self):
+    def test_disconnected_episode_and_unsupported_cause_abstain(self):
         self.memory.ingest("At dawn, Sarah moved the keys to the shelf.")
-        self.memory.ingest("At noon, Noah moved the keys to the drawer.")
-        self.assertIsNone(self.memory.recall(
-            "What is connected to Sarah's keys?")["answer"])
-        self.memory.close()
-        import sqlite3
-        with sqlite3.connect(self.db) as conn:
-            conn.execute("DROP TABLE memory_nodes")
-        self.memory = Memory(self.db, self.learner)
-        self.assertEqual(self.memory.hierarchy("Sarah", "keys")["levels"][0]["evidence_count"], 1)
-        self.assertEqual(self.memory.hierarchy("Noah", "keys")["levels"][0]["evidence_count"], 1)
+        self.memory.ingest("At noon, Noah moved the compass to the drawer.")
+        answer = self.memory.recall(
+            "How are Sarah's keys connected to Noah's compass?")
+        self.assertIsNone(answer["answer"])
+        self.assertIsNone(self.memory.recall("Why did Sarah's keys?")["answer"])
 
 
 if __name__ == "__main__":
