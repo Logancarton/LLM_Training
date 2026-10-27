@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -21,4 +23,4 @@ jobs:
       - name: Compile
         run: python -m compileall -q association_signals.py sonara.py sonara_memory.py train.py tests
       - name: Diff whitespace
-        run: git diff --check HEAD~1 HEAD
+        run: git diff --check $(git merge-base origin/main HEAD) HEAD
