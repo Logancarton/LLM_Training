@@ -1,0 +1,131 @@
+"""Train association strengths from synthetic *labeled* episodes and evaluate held-out identities.
+
+The paragraph encoder in sonara_memory.py is still a bounded teaching grammar.
+"""
+from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+import random
+import tempfile
+
+from sonara_memory import Episode, LinkLearner, Memory, encode_json
+
+TRAIN_PEOPLE = ("Sarah", "Maya", "Noah", "Liam", "Nora", "Emma", "Ivan", "Ava")
+TEST_PEOPLE = ("Zara", "Felix", "Owen", "Ruby", "Amir", "Lena", "Caleb", "Iris")
+TRAIN_ITEMS = ("keys", "journal", "wallet", "notebook", "umbrella", "badge", "camera", "scarf")
+TEST_ITEMS = ("compass", "lantern", "tablet", "map", "violin", "charger", "helmet", "thermos")
+TRAIN_PLACES = ("kitchen table", "front door", "bedroom drawer", "office shelf", "hallway bench", "garage cabinet")
+TEST_PLACES = ("attic shelf", "garden shed", "porch basket", "basement desk", "window ledge", "studio rack")
+
+
+def build_examples(seed: int = 17, n: int = 500, test: bool = False):
+    rng = random.Random(seed)
+    people = TEST_PEOPLE if test else TRAIN_PEOPLE
+    objects = TEST_ITEMS if test else TRAIN_ITEMS
+    places = TEST_PLACES if test else TRAIN_PLACES
+    samples: list[tuple[Episode, Episode, int]] = []
+    paragraphs: list[tuple[str, dict]] = []
+    for i in range(n):
+        actor, other = rng.sample(people, 2)
+        item, other_item = rng.sample(objects, 2)
+        usual, before, after = rng.sample(places, 3)
+        first = Episode(actor=actor, item=item, action="placed", location=before, kind="location")
+        second = Episode(actor=actor, item=item, action="moved", location=after, kind="location")
+        habit = Episode(actor=actor, item=item, action="usually", location=usual, kind="habit")
+        samples.extend([(first, second, 1), (second, habit, 1),
+                        (first, Episode(actor=other, item=item, location=before, kind="location"), 0),
+                        (first, Episode(actor=actor, item=other_item, location=after, kind="location"), 0),
+                        (first, Episode(actor=other, item=other_item, location=before, kind="habit"), 0)])
+        first = rng.choice((
+            f"At dawn, {actor} placed the {item} on the {before}.",
+            f"On Monday morning, {actor} put the {item} on the {before}.",
+            f"At sunrise, {actor} left the {item} at the {before}.",
+            f"At 8 AM, {actor} stored the {item} in the {before}."))
+        second = rng.choice((
+            f"At noon, {actor} moved the {item} to the {after}.",
+            f"Later that afternoon, {actor} moved the {item} into the {after}.",
+            f"At dusk, {actor} carried the {item} to the {after}.",
+            f"On Tuesday evening, {actor} placed the {item} in the {after}."))
+        habitual = rng.choice((
+            f"Usually, {actor} keeps the {item} by the {usual}.",
+            f"Usually, {actor} stores the {item} at the {usual}.",
+            f"Usually, {actor} puts the {item} near the {usual}."))
+        text = f"{first} {second} {habitual}"
+        paragraphs.append((text, {"actor": actor, "item": item, "before": before,
+                                  "after": after, "usual": usual, "novel": True}))
+    rng.shuffle(samples)
+    return samples, paragraphs
+
+
+def association_metrics(learner: LinkLearner, samples: list[tuple[Episode, Episode, int]]) -> dict:
+    tp = fp = tn = fn = 0
+    positive_scores, negative_scores = [], []
+    for a, b, label in samples:
+        score = learner.probability(a, b)
+        if label:
+            positive_scores.append(score)
+        else:
+            negative_scores.append(score)
+        predicted = int(score >= 0.7)
+        tp += int(label == 1 and predicted == 1)
+        fn += int(label == 1 and predicted == 0)
+        fp += int(label == 0 and predicted == 1)
+        tn += int(label == 0 and predicted == 0)
+    return {"accuracy": round((tp+tn)/len(samples), 4),
+            "precision": round(tp/max(1, tp+fp), 4),
+            "recall": round(tp/max(1, tp+fn), 4),
+            "mean_positive_score": round(sum(positive_scores)/len(positive_scores), 4),
+            "mean_negative_score": round(sum(negative_scores)/len(negative_scores), 4)}
+
+
+def benchmark(learner: LinkLearner, stories: list[tuple[str, dict]], n: int = 100) -> dict:
+    correct, attempts, visited, number_edges, parse_count = 0, 0, 0, 0, 0
+    with tempfile.TemporaryDirectory() as folder:
+        with Memory(Path(folder) / "benchmark.db", learner) as memory:
+            for paragraph, gold in stories[:n]:
+                encoded = memory.ingest(paragraph)
+                parse_count += sum(event.kind != "note" for event in encoded)
+                subject = f"{gold['actor']}'s {gold['item']}"
+                probes = [(f"Where are {subject} now?", gold["after"]),
+                          (f"Where were {subject} before?", gold["before"]),
+                          (f"What is unusual about {subject}?",
+                           f"{gold['after']} differs from usual {gold['usual']}"),
+                          (f"Why did {subject}?", None)]
+                for q, expected in probes:
+                    result = memory.recall(q)
+                    attempts += 1
+                    correct += int(result["answer"] == expected)
+                    visited += len(result["activated"])
+            counts = memory.counts()
+            number_edges = counts["links"]
+    return {"queries": attempts, "answer_accuracy": round(correct/max(1, attempts), 4),
+            "extracted_events": parse_count, "mean_activated": round(visited/max(1, attempts), 3),
+            "total_stored_events": 3 * min(len(stories), n), "learned_links": number_edges}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Teach Sonara bounded associative memory")
+    parser.add_argument("--model", default="model.json")
+    parser.add_argument("--examples", type=int, default=500)
+    parser.add_argument("--seed", type=int, default=17)
+    args = parser.parse_args()
+    train, _ = build_examples(seed=args.seed, n=args.examples)
+    heldout, stories = build_examples(seed=args.seed + 23, n=100, test=True)
+    before = LinkLearner()
+    learner = LinkLearner()
+    learner.fit(train)
+    learner.save(args.model)
+    report = {
+        "training_pairs": len(train), "unseen_pairs": len(heldout),
+        "before": association_metrics(before, heldout),
+        "after": association_metrics(learner, heldout),
+        "memory_benchmark": benchmark(learner, stories),
+        "limitations": ["Synthetic grammar only: paragraph extraction is not yet learned",
+                        "Association scores are not validated calibrated probabilities",
+                        "No autonomous code generation or LLM consultation yet"]}
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == "__main__":
+    main()
