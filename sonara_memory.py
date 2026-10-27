@@ -193,14 +193,6 @@ class Memory:
             CREATE INDEX IF NOT EXISTS event_lookup ON events(identity,kind,id);
             CREATE INDEX IF NOT EXISTS event_actor ON events(actor,id);
             CREATE INDEX IF NOT EXISTS event_place ON events(location,id);
-            CREATE TABLE IF NOT EXISTS memory_nodes (
-              node_key TEXT PRIMARY KEY, level INTEGER NOT NULL,
-              identity TEXT NOT NULL, parent_key TEXT,
-              kind TEXT NOT NULL, label TEXT NOT NULL,
-              evidence_count INTEGER NOT NULL, latest_event_id INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS node_identity_level
-              ON memory_nodes(identity,level,evidence_count);
             CREATE TABLE IF NOT EXISTS links (
               source INTEGER NOT NULL, target INTEGER NOT NULL, strength REAL NOT NULL,
               relation TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '[]',
@@ -212,11 +204,6 @@ class Memory:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(links)")}
         if "evidence" not in columns:
             self.conn.execute("ALTER TABLE links ADD COLUMN evidence TEXT NOT NULL DEFAULT '[]'")
-        # Existing databases keep their events and links; derived hierarchy is rebuilt.
-        if not self.conn.execute("SELECT 1 FROM memory_nodes LIMIT 1").fetchone():
-            with self.conn:
-                for row in self.conn.execute("SELECT * FROM events ORDER BY id"):
-                    self._record_hierarchy(self._episode(row))
 
     def close(self) -> None:
         self.conn.close()
@@ -245,7 +232,6 @@ class Memory:
                      entry.stated_time, entry.kind, entry.source))
                 entry.id = cursor.lastrowid
                 if entry.identity:
-                    self._record_hierarchy(entry)
                     self._update_novelty(entry.identity)
             # Re-read after novelty updates so edges incorporate the current evidence.
             for entry in entries:
@@ -298,132 +284,89 @@ class Memory:
             (source,target,strength,relation,evidence) VALUES (?,?,?,?,?)""",
             (new.id, old.id, score, relation, json.dumps(cues)))
 
-    def _record_hierarchy(self, entry: Episode) -> None:
-        """Maintain evidence-backed hierarchy metadata, never inferred new facts.
+    def reactivate(self, actor: str, item: str, limit: int = 5,
+                   hops: int = 2, beam: int = 8) -> dict:
+        """Specific episode cue -> associated context -> reinstated source episodes.
 
-        Level 2: stable scoped identity; level 1: observed event motif (kind,
-        place); level 0: original evidence stored once in events. Aggregates are
-        navigation indexes, not independent memories or assertions of a habit.
+        This is a bounded learned graph, not a simulated hippocampus. No graph
+        path certifies a fact or creates an identity, causal or temporal relation.
         """
-        if not entry.identity:
-            return
-        parent = f"identity:{entry.identity}"
-        nodes = (
-            (parent, 2, entry.identity, None, "identity", entry.identity),
-            (f"pattern:{entry.identity}:{entry.kind}:{entry.location}", 1,
-             entry.identity, parent, entry.kind, entry.location),
-        )
-        for key, level, identity, parent_key, kind, label in nodes:
-            self.conn.execute("""INSERT INTO memory_nodes
-                (node_key,level,identity,parent_key,kind,label,evidence_count,latest_event_id)
-                VALUES (?,?,?,?,?,?,1,?)
-                ON CONFLICT(node_key) DO UPDATE SET
-                  evidence_count=memory_nodes.evidence_count+1,
-                  latest_event_id=excluded.latest_event_id""",
-                (key, level, identity, parent_key, kind, label, entry.id))
-
-    @staticmethod
-    def _node_dict(row: sqlite3.Row) -> dict:
-        return {"level": row["level"], "kind": row["kind"],
-                "label": row["label"], "evidence_count": row["evidence_count"],
-                "latest_event_id": row["latest_event_id"]}
-
-    def hierarchy(self, actor: str, item: str, limit: int = 5) -> dict:
-        """Inspect one identity's persisted levels without scanning other identities."""
-        if not 1 <= limit <= 20:
-            raise ValueError("limit must be between 1 and 20")
+        if not 1 <= limit <= 20 or not 1 <= hops <= 3 or not 1 <= beam <= 20:
+            raise ValueError("limit, hops and beam must be within bounds")
         identity = f"{actor.casefold()}::{item.casefold()}"
-        parent = self.conn.execute("""SELECT * FROM memory_nodes
-            WHERE identity=? AND level=2""", (identity,)).fetchone()
-        patterns = self.conn.execute("""SELECT * FROM memory_nodes
-            WHERE identity=? AND level=1
-            ORDER BY evidence_count DESC, latest_event_id DESC LIMIT ?""",
-            (identity, limit)).fetchall()
-        return {"identity": identity,
-                "levels": ([self._node_dict(parent)] if parent else [])
-                          + [self._node_dict(x) for x in patterns],
-                "meaning": "observed counts, not inferred truths or causal claims"}
-
-    def _activated_levels(self, identity: str, episodes: list[Episode]) -> list[dict]:
-        """Record the actual top-down route, including only visited patterns."""
-        output = []
-        parent = self.conn.execute("""SELECT * FROM memory_nodes
-            WHERE identity=? AND level=2""", (identity,)).fetchone()
-        if parent:
-            output.append(self._node_dict(parent))
-        seen = set()
-        for ep in episodes:
-            key = f"pattern:{ep.identity}:{ep.kind}:{ep.location}"
-            if key not in seen:
-                seen.add(key)
-                node = self.conn.execute(
-                    "SELECT * FROM memory_nodes WHERE node_key=?", (key,)).fetchone()
-                if node:
-                    output.append(self._node_dict(node))
-            output.append({"level": 0, "kind": "episode", "id": ep.id,
-                           "source": ep.source})
-        return output
-
-    def associate(self, actor: str, item: str, limit: int = 5,
-                  context_only: bool = False) -> dict:
-        """Query-dependent sparse activation: identity -> episodes -> learned edges.
-
-        Three recent identity episodes are permitted as seeds. Context edges
-        never become evidence of identity, causation or simultaneous presence.
-        Turning off links must turn off answers requiring learned association.
-        """
-        if not 1 <= limit <= 20:
-            raise ValueError("limit must be between 1 and 20")
-        identity = f"{actor.casefold()}::{item.casefold()}"
-        # Hierarchical selection: one fresh episode plus two strongest observed
-        # motifs. Pattern nodes are evidence counts, never assumed habits.
-        # This avoids letting three near-identical recent events monopolize
-        # the activation budget while relevant older patterns are ignored.
-        freshest = self.conn.execute("""SELECT * FROM events WHERE identity=?
+        row = self.conn.execute("""SELECT * FROM events WHERE identity=?
             ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
-        patterns = self.conn.execute("""SELECT latest_event_id FROM memory_nodes
-            WHERE identity=? AND level=1
-            ORDER BY evidence_count DESC, latest_event_id DESC LIMIT 3""",
-            (identity,)).fetchall()
-        chosen_ids = ([freshest["id"]] if freshest else [])
-        chosen_ids.extend(r["latest_event_id"] for r in patterns
-                          if r["latest_event_id"] not in chosen_ids)
-        chosen_ids = chosen_ids[:3]
-        seeds = [self._episode(r) for event_id in chosen_ids
-                 if (r := self.conn.execute(
-                     "SELECT * FROM events WHERE id=? AND identity=?",
-                     (event_id, identity)).fetchone()) is not None]
-        if not seeds:
-            return {"seed": None, "related": [], "examined": 0,
-                    "activated_levels": []}
-        candidates = {}
+        empty = {"detail_cue": [], "broader_context": [],
+                 "detail_reinstatement": []}
+        if row is None:
+            return {"seed": None, "related": [], "examined": 0, "phases": empty}
+        seed = self._episode(row)
+        cue = {"id": seed.id, "identity": identity, "source": seed.source}
+        # The only routes are the existing supervised association edges.
+        frontier = [(seed.id, 1.0, (seed.id,), ())]
+        winners, contexts = {}, []
         examined = 0
-        relation_filter = "AND l.relation!='identity-continuity'" if context_only else ""
-        for seed in seeds:
-            # Indexed, bounded, one-hop expansion (either edge direction).
-            rows = self.conn.execute(f"""SELECT e.id, e.source, e.identity,
-                l.strength, l.relation, l.evidence FROM links l
-                JOIN events e ON e.id=CASE WHEN l.source=? THEN l.target ELSE l.source END
-                WHERE (l.source=? OR l.target=?) {relation_filter}
-                ORDER BY l.strength DESC LIMIT ?""",
-                (seed.id, seed.id, seed.id, limit * 3)).fetchall()
-            examined += len(rows)
-            for row in rows:
-                if row["id"] not in candidates or row["strength"] > candidates[row["id"]]["strength"]:
-                    candidates[row["id"]] = row
-        neighbors = sorted(candidates.values(),
-                           key=lambda r: (-r["strength"], -r["id"]))[:limit]
-        related = [{"id": r["id"], "identity": r["identity"], "source": r["source"],
-                    "relation": r["relation"],
-                    "association_score": round(r["strength"], 4),
-                    "evidence_cues": json.loads(r["evidence"])} for r in neighbors]
-        trace = self._activated_levels(identity, seeds)
-        # Neighbor events belong to their own identities, not to the seed.
-        trace.extend({"level": 0, "kind": "associated_episode", "id": r["id"],
-                      "identity": r["identity"]} for r in neighbors)
-        return {"seed": {"id": seeds[0].id, "source": seeds[0].source},
-                "related": related, "examined": examined,
-                "activated_levels": trace}
+        for depth in range(1, hops + 1):
+            next_frontier = {}
+            for current_id, activation, path, path_links in frontier:
+                rows = self.conn.execute("""SELECT l.source, l.target, l.strength,
+                    l.relation, l.evidence, e.id AS neighbor_id
+                    FROM links l JOIN events e ON e.id =
+                      CASE WHEN l.source=? THEN l.target ELSE l.source END
+                    WHERE l.source=? OR l.target=?
+                    ORDER BY l.strength DESC, e.id DESC LIMIT ?""",
+                    (current_id, current_id, current_id, beam)).fetchall()
+                examined += len(rows)
+                for edge in rows:
+                    neighbor_id = edge["neighbor_id"]
+                    if neighbor_id in path:
+                        continue
+                    score = activation * edge["strength"] * (0.9 if depth > 1 else 1)
+                    if score < 0.1:
+                        continue
+                    link = {"from_id": current_id, "to_id": neighbor_id,
+                            "relation": edge["relation"],
+                            "edge_strength": round(edge["strength"], 4),
+                            "evidence_cues": json.loads(edge["evidence"])}
+                    candidate = (neighbor_id, score, path + (neighbor_id,),
+                                 path_links + (link,))
+                    if (neighbor_id not in next_frontier or
+                            score > next_frontier[neighbor_id][1]):
+                        next_frontier[neighbor_id] = candidate
+                    if neighbor_id not in winners or score > winners[neighbor_id][1]:
+                        winners[neighbor_id] = candidate
+                    contexts.append({"from_id": current_id, "to_id": neighbor_id,
+                                     "relation": edge["relation"],
+                                     "hop": depth})
+            frontier = sorted(next_frontier.values(),
+                              key=lambda c: (-c[1], -c[0]))[:beam]
+            if not frontier:
+                break
+        selected = sorted(winners.values(), key=lambda c: (-c[1], -c[0]))[:limit]
+        episodes = {}
+        if selected:
+            marks = ",".join("?" for _ in selected)
+            for event in self.conn.execute(f"SELECT * FROM events WHERE id IN ({marks})",
+                                           [entry[0] for entry in selected]):
+                episodes[event["id"]] = self._episode(event)
+        related = []
+        for event_id, score, path, path_links in selected:
+            event = episodes[event_id]
+            related.append({"id": event.id, "identity": event.identity,
+                            "source": event.source, "relation": path_links[-1]["relation"],
+                            "association_score": round(score, 4), "hops": len(path_links),
+                            "path": list(path), "supporting_links": list(path_links),
+                            "evidence_cues": path_links[-1]["evidence_cues"]})
+        return {"seed": cue, "related": related, "examined": examined,
+                "phases": {"detail_cue": [cue], "broader_context": contexts,
+                           "detail_reinstatement": [
+                               {"id": r["id"], "identity": r["identity"],
+                                "source": r["source"], "via_path": r["path"]}
+                               for r in related]}}
+
+    def associate(self, actor: str, item: str, limit: int = 5) -> dict:
+        """Legacy API name; delegates to the single associative retrieval owner."""
+        return self.reactivate(actor, item, limit=limit)
 
     def _update_novelty(self, identity: str) -> None:
         habit = self.conn.execute("""SELECT location FROM events
@@ -434,37 +377,36 @@ class Memory:
 
     def recall(self, query: str, limit: int = 3) -> dict:
         """Answers a bounded query grammar, safely abstaining otherwise."""
-        if not 1 <= limit <= 20:
-            raise ValueError("limit must be between 1 and 20")
-        # Association questions cannot be answered from indexed locations alone.
-        # Learned contextual edges must supply the evidence; empty graph -> abstain.
-        association = re.fullmatch(
-            r"What (?:else )?is (?:associated with|connected to|related to) "
+        requested = re.fullmatch(
+            r"What is (?:connected|associated|related) to "
             r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)\?",
             query.strip(), re.I)
-        if association:
-            actor, item = association["actor"].title(), association["item"].lower()
-            identity = f"{actor.lower()}::{item}"
-            result = self.associate(actor, item, limit=limit, context_only=True)
-            # A contextual link is not a fact that entities are identical.
-            neighbor = next((r for r in result["related"] if r["identity"] != identity), None)
-            if neighbor is None:
-                return {"answer": None, "reason": "No learned contextual link",
-                        "activated": [], "examined": result["examined"],
-                        "activated_levels": result["activated_levels"]}
-            other_actor, other_item = neighbor["identity"].split("::", 1)
-            relation = neighbor["relation"]
-            description = ("share a recorded actor" if relation == "shared-actor"
-                           else "share a recorded place (not necessarily at the same time)")
-            answer = (f"{actor}'s {item} and {other_actor.title()}'s {other_item} "
-                      f"{description}.")
-            return {"answer": answer, "reason": None,
-                    "activated": [{"id": neighbor["id"],
-                                   "source": neighbor["source"],
-                                   "strength": neighbor["association_score"]}],
-                    "examined": result["examined"],
-                    "activated_levels": result["activated_levels"],
-                    "association_relation": relation}
+        if requested:
+            identity = f"{requested['actor'].lower()}::{requested['item'].lower()}"
+            state = self.reactivate(requested["actor"], requested["item"], limit=20)
+            related = next((r for r in state["related"] if r["identity"] != identity), None)
+            return {"answer": related["source"] if related else None,
+                    "reason": None if related else "No stored associative path",
+                    "activated": [related] if related else [],
+                    "examined": state["examined"], "phases": state["phases"]}
+
+        connected = re.fullmatch(
+            r"How are (?P<a>[A-Z][a-z]+)'s (?P<ia>[a-z][a-z -]*?) "
+            r"connected to (?P<b>[A-Z][a-z]+)'s (?P<ib>[a-z][a-z -]*?)\?",
+            query.strip(), re.I)
+        if connected:
+            subject = f"{connected['a'].lower()}::{connected['ia'].lower()}"
+            target = f"{connected['b'].lower()}::{connected['ib'].lower()}"
+            state = self.reactivate(connected["a"], connected["ia"],
+                                    limit=20, hops=2, beam=12)
+            related = next((r for r in state["related"]
+                            if r["identity"] == target and target != subject), None)
+            return {"answer": "Connected via recorded associations only, not "
+                    "evidence of causation, co-presence, or shared identity."
+                    if related else None,
+                    "reason": None if related else "No stored associative path",
+                    "activated": [related] if related else [],
+                    "examined": state["examined"], "phases": state["phases"]}
         match = re.fullmatch(
             r"(?P<prompt>Where (?:are|were|is|was)|What is unusual about|Why did) "
             r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)"
@@ -488,13 +430,8 @@ class Memory:
             answer = selected.location if selected else None
             seeds = [selected] if selected else []
         else:
-            # Pattern-level activation identifies the latest explicit habit,
-            # then descends to its source event for factual comparison.
-            habit = self.conn.execute("""SELECT e.* FROM memory_nodes n
-                JOIN events e ON e.id=n.latest_event_id
-                WHERE n.identity=? AND n.level=1 AND n.kind='habit'
-                ORDER BY n.latest_event_id DESC LIMIT 1""",
-                (identity,)).fetchone()
+            habit = self.conn.execute("""SELECT * FROM events WHERE identity=? AND kind='habit'
+                ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
             recent = self.conn.execute("""SELECT * FROM events WHERE identity=? AND kind='location'
                 ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
             latest = self._episode(recent) if recent else None
@@ -518,8 +455,7 @@ class Memory:
                     activated.append({"id": neighbor["id"], "source": neighbor["source"],
                                       "strength": round(neighbor["strength"], 4)})
         return {"answer": answer, "reason": None if answer else "Insufficient recorded evidence",
-                "activated": activated, "examined": len(rows) + len(activated) - len(seeds),
-                "activated_levels": self._activated_levels(identity, seeds)}
+                "activated": activated, "examined": len(rows) + len(activated) - len(seeds)}
 
     def counts(self) -> dict[str, int]:
         return {table: self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
