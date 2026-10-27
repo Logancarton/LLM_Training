@@ -1,0 +1,24 @@
+name: Sonara memory gates
+
+on:
+  push:
+    branches:
+      - sonara-hierarchical-sparse-activation-20261026
+  pull_request:
+
+jobs:
+  memory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Behavioral and integration tests
+        run: python -m unittest discover -s tests -v
+      - name: Synthetic benchmark
+        run: python train.py --model /tmp/sonara-trained.json --examples 500
+      - name: Compile
+        run: python -m compileall -q association_signals.py sonara.py sonara_memory.py train.py tests
+      - name: Diff whitespace
+        run: git diff --check HEAD~1 HEAD
