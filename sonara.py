@@ -17,6 +17,10 @@ def main():
     related.add_argument("actor")
     related.add_argument("item")
     related.add_argument("--limit", type=int, default=5)
+    hierarchy = sub.add_parser("hierarchy")
+    hierarchy.add_argument("actor")
+    hierarchy.add_argument("item")
+    hierarchy.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     learner = LinkLearner.load(args.model)
     with Memory(args.db, learner) as memory:
@@ -24,8 +28,10 @@ def main():
             print(encode_json(memory.ingest(args.paragraph)))
         elif args.command == "ask":
             print(json.dumps(memory.recall(args.question), indent=2))
-        else:
+        elif args.command == "related":
             print(json.dumps(memory.associate(args.actor, args.item, args.limit), indent=2))
+        else:
+            print(json.dumps(memory.hierarchy(args.actor, args.item, args.limit), indent=2))
 
 
 if __name__ == "__main__":
