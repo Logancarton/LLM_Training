@@ -193,6 +193,14 @@ class Memory:
             CREATE INDEX IF NOT EXISTS event_lookup ON events(identity,kind,id);
             CREATE INDEX IF NOT EXISTS event_actor ON events(actor,id);
             CREATE INDEX IF NOT EXISTS event_place ON events(location,id);
+            CREATE TABLE IF NOT EXISTS memory_nodes (
+              node_key TEXT PRIMARY KEY, level INTEGER NOT NULL,
+              identity TEXT NOT NULL, parent_key TEXT,
+              kind TEXT NOT NULL, label TEXT NOT NULL,
+              evidence_count INTEGER NOT NULL, latest_event_id INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS node_identity_level
+              ON memory_nodes(identity,level,evidence_count);
             CREATE TABLE IF NOT EXISTS links (
               source INTEGER NOT NULL, target INTEGER NOT NULL, strength REAL NOT NULL,
               relation TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '[]',
@@ -204,6 +212,11 @@ class Memory:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(links)")}
         if "evidence" not in columns:
             self.conn.execute("ALTER TABLE links ADD COLUMN evidence TEXT NOT NULL DEFAULT '[]'")
+        # Existing databases keep their events and links; derived hierarchy is rebuilt.
+        if not self.conn.execute("SELECT 1 FROM memory_nodes LIMIT 1").fetchone():
+            with self.conn:
+                for row in self.conn.execute("SELECT * FROM events ORDER BY id"):
+                    self._record_hierarchy(self._episode(row))
 
     def close(self) -> None:
         self.conn.close()
@@ -232,6 +245,7 @@ class Memory:
                      entry.stated_time, entry.kind, entry.source))
                 entry.id = cursor.lastrowid
                 if entry.identity:
+                    self._record_hierarchy(entry)
                     self._update_novelty(entry.identity)
             # Re-read after novelty updates so edges incorporate the current evidence.
             for entry in entries:
@@ -284,26 +298,116 @@ class Memory:
             (source,target,strength,relation,evidence) VALUES (?,?,?,?,?)""",
             (new.id, old.id, score, relation, json.dumps(cues)))
 
-    def associate(self, actor: str, item: str, limit: int = 5) -> dict:
-        """Sparse, evidence-labeled associative recall. Never asserts causal truth."""
-        if limit < 1 or limit > 20:
+    def _record_hierarchy(self, entry: Episode) -> None:
+        """Maintain evidence-backed hierarchy metadata, never inferred new facts.
+
+        Level 2: stable scoped identity; level 1: observed event motif (kind,
+        place); level 0: original evidence stored once in events. Aggregates are
+        navigation indexes, not independent memories or assertions of a habit.
+        """
+        if not entry.identity:
+            return
+        parent = f"identity:{entry.identity}"
+        nodes = (
+            (parent, 2, entry.identity, None, "identity", entry.identity),
+            (f"pattern:{entry.identity}:{entry.kind}:{entry.location}", 1,
+             entry.identity, parent, entry.kind, entry.location),
+        )
+        for key, level, identity, parent_key, kind, label in nodes:
+            self.conn.execute("""INSERT INTO memory_nodes
+                (node_key,level,identity,parent_key,kind,label,evidence_count,latest_event_id)
+                VALUES (?,?,?,?,?,?,1,?)
+                ON CONFLICT(node_key) DO UPDATE SET
+                  evidence_count=memory_nodes.evidence_count+1,
+                  latest_event_id=excluded.latest_event_id""",
+                (key, level, identity, parent_key, kind, label, entry.id))
+
+    @staticmethod
+    def _node_dict(row: sqlite3.Row) -> dict:
+        return {"level": row["level"], "kind": row["kind"],
+                "label": row["label"], "evidence_count": row["evidence_count"],
+                "latest_event_id": row["latest_event_id"]}
+
+    def hierarchy(self, actor: str, item: str, limit: int = 5) -> dict:
+        """Inspect one identity's persisted levels without scanning other identities."""
+        if not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
         identity = f"{actor.casefold()}::{item.casefold()}"
-        seed = self.conn.execute("""SELECT * FROM events WHERE identity=?
-            ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
-        if seed is None:
-            return {"seed": None, "related": [], "examined": 0}
-        # Both inbound and outbound edges, so old events can reactivate new events.
-        rows = self.conn.execute("""SELECT e.id, e.source, e.identity,
-             l.strength, l.relation, l.evidence FROM links l
-             JOIN events e ON e.id = CASE WHEN l.source=? THEN l.target ELSE l.source END
-             WHERE l.source=? OR l.target=? ORDER BY l.strength DESC LIMIT ?""",
-             (seed["id"], seed["id"], seed["id"], limit)).fetchall()
-        return {"seed": {"id": seed["id"], "source": seed["source"]},
-                "related": [{"id": x["id"], "source": x["source"],
-                             "relation": x["relation"], "association_score": round(x["strength"], 4),
-                             "evidence_cues": json.loads(x["evidence"])} for x in rows],
-                "examined": len(rows)}
+        parent = self.conn.execute("""SELECT * FROM memory_nodes
+            WHERE identity=? AND level=2""", (identity,)).fetchone()
+        patterns = self.conn.execute("""SELECT * FROM memory_nodes
+            WHERE identity=? AND level=1
+            ORDER BY evidence_count DESC, latest_event_id DESC LIMIT ?""",
+            (identity, limit)).fetchall()
+        return {"identity": identity,
+                "levels": ([self._node_dict(parent)] if parent else [])
+                          + [self._node_dict(x) for x in patterns],
+                "meaning": "observed counts, not inferred truths or causal claims"}
+
+    def _activated_levels(self, identity: str, episodes: list[Episode]) -> list[dict]:
+        """Record the actual top-down route, including only visited patterns."""
+        output = []
+        parent = self.conn.execute("""SELECT * FROM memory_nodes
+            WHERE identity=? AND level=2""", (identity,)).fetchone()
+        if parent:
+            output.append(self._node_dict(parent))
+        seen = set()
+        for ep in episodes:
+            key = f"pattern:{ep.identity}:{ep.kind}:{ep.location}"
+            if key not in seen:
+                seen.add(key)
+                node = self.conn.execute(
+                    "SELECT * FROM memory_nodes WHERE node_key=?", (key,)).fetchone()
+                if node:
+                    output.append(self._node_dict(node))
+            output.append({"level": 0, "kind": "episode", "id": ep.id,
+                           "source": ep.source})
+        return output
+
+    def associate(self, actor: str, item: str, limit: int = 5,
+                  context_only: bool = False) -> dict:
+        """Query-dependent sparse activation: identity -> episodes -> learned edges.
+
+        Three recent identity episodes are permitted as seeds. Context edges
+        never become evidence of identity, causation or simultaneous presence.
+        Turning off links must turn off answers requiring learned association.
+        """
+        if not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        identity = f"{actor.casefold()}::{item.casefold()}"
+        seeds = [self._episode(r) for r in self.conn.execute("""SELECT * FROM events
+            WHERE identity=? ORDER BY id DESC LIMIT 3""", (identity,))]
+        if not seeds:
+            return {"seed": None, "related": [], "examined": 0,
+                    "activated_levels": []}
+        candidates = {}
+        examined = 0
+        relation_filter = "AND l.relation!='identity-continuity'" if context_only else ""
+        for seed in seeds:
+            # Indexed, bounded, one-hop expansion (either edge direction).
+            rows = self.conn.execute(f"""SELECT e.id, e.source, e.identity,
+                l.strength, l.relation, l.evidence FROM links l
+                JOIN events e ON e.id=CASE WHEN l.source=? THEN l.target ELSE l.source END
+                WHERE (l.source=? OR l.target=?) {relation_filter}
+                ORDER BY l.strength DESC LIMIT ?""",
+                (seed.id, seed.id, seed.id, limit * 3)).fetchall()
+            examined += len(rows)
+            for row in rows:
+                if row["id"] not in candidates or row["strength"] > candidates[row["id"]]["strength"]:
+                    candidates[row["id"]] = row
+        neighbors = sorted(candidates.values(),
+                           key=lambda r: (-r["strength"], -r["id"]))[:limit]
+        related = [{"id": r["id"], "identity": r["identity"], "source": r["source"],
+                    "relation": r["relation"],
+                    "association_score": round(r["strength"], 4),
+                    "evidence_cues": json.loads(r["evidence"])} for r in neighbors]
+        trace = self._activated_levels(identity, seeds)
+        # Neighbor events belong to their own identities, not to the seed.
+        trace.extend({"level": 0, "kind": "associated_episode", "id": r["id"],
+                      "identity": r["identity"]} for r in neighbors)
+        return {"seed": {"id": seeds[0].id, "source": seeds[0].source},
+                "related": related, "examined": examined,
+                "activated_levels": trace}
 
     def _update_novelty(self, identity: str) -> None:
         habit = self.conn.execute("""SELECT location FROM events
@@ -314,6 +418,37 @@ class Memory:
 
     def recall(self, query: str, limit: int = 3) -> dict:
         """Answers a bounded query grammar, safely abstaining otherwise."""
+        if not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        # Association questions cannot be answered from indexed locations alone.
+        # Learned contextual edges must supply the evidence; empty graph -> abstain.
+        association = re.fullmatch(
+            r"What (?:else )?is (?:associated with|connected to|related to) "
+            r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)\\?",
+            query.strip(), re.I)
+        if association:
+            actor, item = association["actor"].title(), association["item"].lower()
+            identity = f"{actor.lower()}::{item}"
+            result = self.associate(actor, item, limit=limit, context_only=True)
+            # A contextual link is not a fact that entities are identical.
+            neighbor = next((r for r in result["related"] if r["identity"] != identity), None)
+            if neighbor is None:
+                return {"answer": None, "reason": "No learned contextual link",
+                        "activated": [], "examined": result["examined"],
+                        "activated_levels": result["activated_levels"]}
+            other_actor, other_item = neighbor["identity"].split("::", 1)
+            relation = neighbor["relation"]
+            description = ("share a recorded actor" if relation == "shared-actor"
+                           else "share a recorded place (not necessarily at the same time)")
+            answer = (f"{actor}'s {item} and {other_actor.title()}'s {other_item} "
+                      f"{description}.")
+            return {"answer": answer, "reason": None,
+                    "activated": [{"id": neighbor["id"],
+                                   "source": neighbor["source"],
+                                   "strength": neighbor["association_score"]}],
+                    "examined": result["examined"],
+                    "activated_levels": result["activated_levels"],
+                    "association_relation": relation}
         match = re.fullmatch(
             r"(?P<prompt>Where (?:are|were|is|was)|What is unusual about|Why did) "
             r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)"
@@ -362,7 +497,8 @@ class Memory:
                     activated.append({"id": neighbor["id"], "source": neighbor["source"],
                                       "strength": round(neighbor["strength"], 4)})
         return {"answer": answer, "reason": None if answer else "Insufficient recorded evidence",
-                "activated": activated, "examined": len(rows) + len(activated) - len(seeds)}
+                "activated": activated, "examined": len(rows) + len(activated) - len(seeds),
+                "activated_levels": self._activated_levels(identity, seeds)}
 
     def counts(self) -> dict[str, int]:
         return {table: self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
