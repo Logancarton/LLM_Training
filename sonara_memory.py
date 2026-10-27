@@ -375,8 +375,24 @@ class Memory:
         if not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
         identity = f"{actor.casefold()}::{item.casefold()}"
-        seeds = [self._episode(r) for r in self.conn.execute("""SELECT * FROM events
-            WHERE identity=? ORDER BY id DESC LIMIT 3""", (identity,))]
+        # Hierarchical selection: one fresh episode plus two strongest observed
+        # motifs. Pattern nodes are evidence counts, never assumed habits.
+        # This avoids letting three near-identical recent events monopolize
+        # the activation budget while relevant older patterns are ignored.
+        freshest = self.conn.execute("""SELECT * FROM events WHERE identity=?
+            ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
+        patterns = self.conn.execute("""SELECT latest_event_id FROM memory_nodes
+            WHERE identity=? AND level=1
+            ORDER BY evidence_count DESC, latest_event_id DESC LIMIT 3""",
+            (identity,)).fetchall()
+        chosen_ids = ([freshest["id"]] if freshest else [])
+        chosen_ids.extend(r["latest_event_id"] for r in patterns
+                          if r["latest_event_id"] not in chosen_ids)
+        chosen_ids = chosen_ids[:3]
+        seeds = [self._episode(r) for event_id in chosen_ids
+                 if (r := self.conn.execute(
+                     "SELECT * FROM events WHERE id=? AND identity=?",
+                     (event_id, identity)).fetchone()) is not None]
         if not seeds:
             return {"seed": None, "related": [], "examined": 0,
                     "activated_levels": []}
@@ -424,7 +440,7 @@ class Memory:
         # Learned contextual edges must supply the evidence; empty graph -> abstain.
         association = re.fullmatch(
             r"What (?:else )?is (?:associated with|connected to|related to) "
-            r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)\\?",
+            r"(?P<actor>[A-Z][a-z]+)'s (?P<item>[a-z][a-z -]*?)\?",
             query.strip(), re.I)
         if association:
             actor, item = association["actor"].title(), association["item"].lower()
@@ -472,8 +488,13 @@ class Memory:
             answer = selected.location if selected else None
             seeds = [selected] if selected else []
         else:
-            habit = self.conn.execute("""SELECT * FROM events WHERE identity=? AND kind='habit'
-                ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
+            # Pattern-level activation identifies the latest explicit habit,
+            # then descends to its source event for factual comparison.
+            habit = self.conn.execute("""SELECT e.* FROM memory_nodes n
+                JOIN events e ON e.id=n.latest_event_id
+                WHERE n.identity=? AND n.level=1 AND n.kind='habit'
+                ORDER BY n.latest_event_id DESC LIMIT 1""",
+                (identity,)).fetchone()
             recent = self.conn.execute("""SELECT * FROM events WHERE identity=? AND kind='location'
                 ORDER BY id DESC LIMIT 1""", (identity,)).fetchone()
             latest = self._episode(recent) if recent else None
